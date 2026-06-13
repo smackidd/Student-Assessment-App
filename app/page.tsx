@@ -22,10 +22,13 @@ import {
 } from "recharts";
 import {
   createUserWithEmailAndPassword,
+  EmailAuthProvider,
   getAuth,
   onAuthStateChanged,
+  reauthenticateWithCredential,
   signInWithEmailAndPassword,
   signOut,
+  updatePassword,
   updateProfile,
   type User
 } from "firebase/auth";
@@ -72,7 +75,7 @@ const pastelRoundColors = [
 type AppView = "overview" | "dashboard" | "assessment" | "report" | "files" | "profile";
 type AssessmentPageTab = "builder" | "entry";
 type UserRole = (typeof roles)[number];
-type ProfilePageTab = "profile" | "audit" | "team";
+type ProfilePageTab = "profile" | "password" | "audit" | "team";
 type StudentNotePermission = "admin_only" | "all";
 type SaveStatus = "saved" | "dirty" | "saving" | "error";
 type RecordAudit = (eventType: string, entityType: string, entityLabel: string, description: string) => void;
@@ -413,11 +416,16 @@ export default function StudentEvaluationApp() {
       };
       await savePrototypeWorkspaceState(workspaceState);
       const result = await saveStudentsToDatabase(orfRows);
+      if (activeView === "profile" && authUser && userProfile.name && userProfile.name !== authUser.displayName) {
+        await updateProfile(authUser, { displayName: userProfile.name });
+      }
       setLastSavedWorkspaceState(workspaceState);
       setDatabaseStudentNames(uniqueStudentNames(orfRows));
       setSaveStatus("saved");
       setSaveMessage(
-        `Saved to Firebase. ${result.createdCount} new student${result.createdCount === 1 ? "" : "s"} added; ${result.updatedCount} updated.`
+        activeView === "profile"
+          ? "Saved profile data to Firebase."
+          : `Saved to Firebase. ${result.createdCount} new student${result.createdCount === 1 ? "" : "s"} added; ${result.updatedCount} updated.`
       );
       recordAudit("Saved table", "Firebase Data Connect", "Student table", "Saved visible student rows to the SQL Student table.");
     } catch (error) {
@@ -965,6 +973,7 @@ export default function StudentEvaluationApp() {
             teamMembers={teamMembers}
             setTeamMembers={setTeamMembers}
             events={auditEvents}
+            authUser={authUser}
             openInvite={() => setInviteDialogOpen(true)}
             markUnsaved={markUnsaved}
             saveStatus={saveStatus}
@@ -1262,6 +1271,14 @@ function friendlyAuthError(error: unknown) {
   if (message.includes("auth/weak-password")) return "Use a password with at least 6 characters.";
   if (message.includes("auth/operation-not-allowed")) return "Email/password sign-in is not enabled in Firebase yet.";
   return message || "Something went wrong with sign-in.";
+}
+
+function friendlyPasswordError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("auth/invalid-credential")) return "The current password did not match.";
+  if (message.includes("auth/requires-recent-login")) return "Please sign out, sign back in, and try changing your password again.";
+  if (message.includes("auth/weak-password")) return "Use a password with at least 6 characters.";
+  return message || "Password change failed.";
 }
 
 function AssessmentBuilder({
@@ -2434,6 +2451,7 @@ function ProfilePage({
   teamMembers,
   setTeamMembers,
   events,
+  authUser,
   openInvite,
   markUnsaved,
   saveStatus,
@@ -2450,13 +2468,19 @@ function ProfilePage({
   teamMembers: TeamMember[];
   setTeamMembers: React.Dispatch<React.SetStateAction<TeamMember[]>>;
   events: AppAuditEvent[];
+  authUser: User | null;
   openInvite: () => void;
   markUnsaved: (message?: string) => void;
   saveStatus: SaveStatus;
   saveMessage: string;
   onSave: () => Promise<void>;
 }) {
-  const visibleTab = isAdmin ? activeTab : "profile";
+  const visibleTab = isAdmin || activeTab === "password" ? activeTab : "profile";
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordStatus, setPasswordStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
+  const [passwordMessage, setPasswordMessage] = useState("Use your current password to set a new one.");
 
   function updateProfileField(field: keyof typeof profile, value: string) {
     setProfile((current) => ({ ...current, [field]: value }));
@@ -2468,6 +2492,40 @@ function ProfilePage({
     markUnsaved("Team role changed. Save to update Firebase.");
     const member = teamMembers.find((item) => item.id === memberId);
     if (member?.email === profile.email) setCurrentRole(role);
+  }
+
+  async function changePassword() {
+    if (!authUser?.email) {
+      setPasswordStatus("error");
+      setPasswordMessage("Sign in with an email account before changing your password.");
+      return;
+    }
+    if (newPassword.length < 6) {
+      setPasswordStatus("error");
+      setPasswordMessage("Use a password with at least 6 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordStatus("error");
+      setPasswordMessage("The new passwords do not match.");
+      return;
+    }
+
+    setPasswordStatus("saving");
+    setPasswordMessage("Updating password...");
+    try {
+      const credential = EmailAuthProvider.credential(authUser.email, currentPassword);
+      await reauthenticateWithCredential(authUser, credential);
+      await updatePassword(authUser, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setPasswordStatus("success");
+      setPasswordMessage("Password changed.");
+    } catch (error) {
+      setPasswordStatus("error");
+      setPasswordMessage(friendlyPasswordError(error));
+    }
   }
 
   return (
@@ -2485,6 +2543,9 @@ function ProfilePage({
         <button className={visibleTab === "profile" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("profile")} type="button">
           Profile
         </button>
+        <button className={visibleTab === "password" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("password")} type="button">
+          Change Password
+        </button>
         {isAdmin ? (
           <>
             <button className={visibleTab === "audit" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("audit")} type="button">
@@ -2495,6 +2556,10 @@ function ProfilePage({
             </button>
           </>
         ) : null}
+      </div>
+
+      <div className="profile-save-row">
+        <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} compact />
       </div>
 
       {visibleTab === "profile" ? (
@@ -2536,11 +2601,53 @@ function ProfilePage({
         </div>
       ) : null}
 
+      {visibleTab === "password" ? (
+        <div className="panel profile-form password-form">
+          <label>
+            Current password
+            <input
+              autoComplete="current-password"
+              type="password"
+              value={currentPassword}
+              onChange={(event) => setCurrentPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            New password
+            <input
+              autoComplete="new-password"
+              type="password"
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            Confirm new password
+            <input
+              autoComplete="new-password"
+              type="password"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+            />
+          </label>
+          <div className={`password-action ${passwordStatus}`}>
+            <button
+              className="primary-action"
+              disabled={passwordStatus === "saving" || !currentPassword || !newPassword || !confirmPassword}
+              onClick={changePassword}
+              type="button"
+            >
+              {passwordStatus === "saving" ? "Changing..." : "Change Password"}
+            </button>
+            <span>{passwordMessage}</span>
+          </div>
+        </div>
+      ) : null}
+
       {visibleTab === "audit" ? <AuditLog events={events} /> : null}
 
       {visibleTab === "team" ? (
         <div className="panel team-panel">
-          <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} />
           <div className="panel-heading with-action">
             <div>
               <p className="eyebrow">Team</p>

@@ -1636,6 +1636,19 @@ textarea {
   gap: 16px;
 }
 
+.profile-tabs {
+  margin-bottom: 0;
+  padding: 4px;
+}
+
+.profile-tabs .view-tab {
+  padding: 7px 11px;
+}
+
+.profile-save-row {
+  margin-top: -8px;
+}
+
 .profile-hero {
   display: flex;
   align-items: center;
@@ -1655,6 +1668,33 @@ textarea {
 
 .profile-form label {
   margin-top: 0;
+}
+
+.password-form {
+  align-items: end;
+}
+
+.password-action {
+  display: grid;
+  gap: 8px;
+}
+
+.password-action .primary-action {
+  margin-top: 0;
+}
+
+.password-action span {
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.password-action.success span {
+  color: #1f6b3a;
+}
+
+.password-action.error span {
+  color: #8a1f1f;
 }
 
 .team-row {
