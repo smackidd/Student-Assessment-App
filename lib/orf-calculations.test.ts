@@ -23,6 +23,7 @@ describe("ORF calculations", () => {
 
   it("only calculates ORF percentile when median is below 50", () => {
     expect(calculateOrfPercentile(54)).toBeNull();
+    expect(calculateOrfPercentile(50)).toBeNull();
     expect(calculateOrfPercentile(45)).toBe(25);
     expect(calculateOrfPercentile(33)).toBe(16);
     expect(calculateOrfPercentile(23)).toBe(10);

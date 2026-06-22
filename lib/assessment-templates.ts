@@ -57,9 +57,9 @@ export const assessmentTemplates: AssessmentTemplate[] = [
     gradeScope: "Grades 3-12",
     rounds: defaultRounds,
     sections: [
-      { id: "passage-1", name: "1st passage", roundIds: ["fall"] },
-      { id: "passage-2", name: "2nd passage", roundIds: ["fall"] },
-      { id: "passage-3", name: "3rd passage", roundIds: ["fall"] }
+      { id: "passage-1", name: "1st passage", roundIds: ["fall", "winter", "spring"] },
+      { id: "passage-2", name: "2nd passage", roundIds: ["fall", "winter", "spring"] },
+      { id: "passage-3", name: "3rd passage", roundIds: ["fall", "winter", "spring"] }
     ],
     fields: [
       {

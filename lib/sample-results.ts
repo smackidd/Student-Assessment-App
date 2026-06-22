@@ -1,9 +1,13 @@
 import { calculateOrfRound } from "@/lib/orf-calculations";
 
+export type AssessmentValue = string | number | null;
+export type AssessmentValueMap = Record<string, AssessmentValue>;
+
 export type OrfResultRow = {
   id: string;
   homeroom: string;
   student: string;
+  assessmentValues?: AssessmentValueMap;
   septP1Wpm: number | null;
   septP1Epm: number | null;
   septP2Wpm: number | null;

@@ -42,21 +42,47 @@ import {
   type AssessmentTemplate,
 } from "@/lib/assessment-templates";
 import {
+  assessmentValueKey,
+  buildEntryRows,
+  buildOverviewRows,
+  entryValue,
+  fieldSectionSummary,
+  fieldWindowSummary,
+  isEditableAssessmentField,
+  labelsForIds,
+  normalizedAssessmentValue,
+  sectionsForAssessmentRound,
+  toNumber,
+  uniqueIds,
+  updateAssessmentRowFromTableEdit,
+  type EntryRow
+} from "@/lib/assessment-entry";
+import {
   loadPrototypeWorkspaceState,
   savePrototypeWorkspaceState,
   saveStudentsToDatabase
 } from "@/lib/student-database";
 import { firebaseApp } from "@/lib/firebase";
-import { hydrateOrfRow, initialOrfRows, type OrfResultRow } from "@/lib/sample-results";
+import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 const dataTypes: AssessmentDataType[] = ["integer", "percentage", "letter", "text", "date", "file", "calculated"];
 const dashboardYears = ["2026-2027", "2025-2026", "2024-2025"];
 const roles = ["Principal", "Vice Principal", "Evaluator"] as const;
-const savedCalculations = ["custom", "orf_cwpm", "median", "orf_percentile", "average", "sum", "count", "min", "max"];
-const conditionOperators = ["+", "-", "*", "/", "AND", "OR", "<", ">", "=", "!="];
-const comparisonOperators = ["<", ">", "=", "!="];
+const predefinedCalculations = [
+  {
+    key: "median",
+    label: "MED",
+    description: "Calculates the MED of all CWPM values for the current window."
+  },
+  {
+    key: "orf_percentile",
+    label: "ORF_Percentile",
+    description: "Applies the ORF percentile to the current window only when the current window MED is below 50."
+  }
+] as const;
+const defaultCalculationKey = predefinedCalculations[0].key;
 const pastelRoundColors = [
   "#ffe3d8",
   "#fff0bf",
@@ -98,25 +124,19 @@ export default function StudentEvaluationApp() {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [organizationAccess, setOrganizationAccess] = useState<"checking" | "active" | "uninvited">("checking");
-  const [orfRows, setOrfRows] = useState<OrfResultRow[]>(initialOrfRows);
+  const [orfRows, setOrfRows] = useState<OrfResultRow[]>([]);
   const [schoolYears, setSchoolYears] = useState(dashboardYears);
   const [selectedOverviewYear, setSelectedOverviewYear] = useState(dashboardYears[0]);
   const [selectedOverviewGrade, setSelectedOverviewGrade] = useState("3");
+  const [tableFullScreen, setTableFullScreen] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
   const [saveMessage, setSaveMessage] = useState("No unsaved table changes.");
   const [unsavedAlertDismissed, setUnsavedAlertDismissed] = useState(false);
-  const [databaseStudentNames, setDatabaseStudentNames] = useState(() => uniqueStudentNames(initialOrfRows));
+  const [databaseStudentNames, setDatabaseStudentNames] = useState<string[]>([]);
   const [overviewDuplicateConflicts, setOverviewDuplicateConflicts] = useState<DuplicateStudentNameConflict[]>([]);
   const [lastSavedWorkspaceState, setLastSavedWorkspaceState] = useState<SavedWorkspaceState | null>(null);
   const [lockedOverviewYears, setLockedOverviewYears] = useState<string[]>([]);
-  const [overviewPlacements, setOverviewPlacements] = useState<StudentPlacement[]>(
-    initialOrfRows.map((row) => ({
-      studentId: row.id,
-      schoolYear: dashboardYears[0],
-      grade: "3",
-      homeroom: row.homeroom
-    }))
-  );
+  const [overviewPlacements, setOverviewPlacements] = useState<StudentPlacement[]>([]);
   const [uploadedReports, setUploadedReports] = useState<UploadedReport[]>([]);
   const [activeNoteStudentId, setActiveNoteStudentId] = useState<string | null>(null);
   const [overviewDialog, setOverviewDialog] = useState<OverviewDialog>(null);
@@ -162,13 +182,7 @@ export default function StudentEvaluationApp() {
     name: "",
     dataType: "integer" as AssessmentDataType,
     isCalculated: false,
-    calculationKey: "custom",
-    calculationExpression: "",
-    conditionLeft: "median",
-    conditionOperator: "<",
-    conditionRight: "50",
-    conditionJoinOperator: "",
-    conditionExtra: "",
+    calculationKey: defaultCalculationKey as string,
     letterRanks: "",
     selectedRoundIds: [] as string[],
     selectedSectionIds: [] as string[]
@@ -270,16 +284,9 @@ export default function StudentEvaluationApp() {
           return;
         }
 
-        setSaveStatus("saving");
-        setSaveMessage("Migrating the starter assessment workspace to Firebase...");
-        const starterState: SavedWorkspaceState = {
-          rows: initialOrfRows,
-          placements: initialOrfRows.map((row) => ({
-            studentId: row.id,
-            schoolYear: dashboardYears[0],
-            grade: "3",
-            homeroom: row.homeroom
-          })),
+        const cleanState: SavedWorkspaceState = {
+          rows: [],
+          placements: [],
           templates: assessmentTemplates,
           schoolYears: dashboardYears,
           lockedOverviewYears: [],
@@ -287,15 +294,15 @@ export default function StudentEvaluationApp() {
           userProfile,
           teamMembers
         };
-        await savePrototypeWorkspaceState(starterState);
-        const result = await saveStudentsToDatabase(initialOrfRows);
-        if (cancelled) return;
-        setLastSavedWorkspaceState(starterState);
-        setDatabaseStudentNames(uniqueStudentNames(initialOrfRows));
+        setOrfRows([]);
+        setOverviewPlacements([]);
+        setTemplates(assessmentTemplates);
+        setSchoolYears(dashboardYears);
+        setLastSavedWorkspaceState(cleanState);
+        setDatabaseStudentNames([]);
+        setLockedOverviewYears([]);
         setSaveStatus("saved");
-        setSaveMessage(
-          `Migrated starter data to Firebase. ${result.createdCount} student${result.createdCount === 1 ? "" : "s"} added; ${result.updatedCount} updated.`
-        );
+        setSaveMessage("No saved workspace found. Starting with a clean slate.");
         setOrganizationAccess("active");
       } catch (error) {
         if (cancelled) return;
@@ -373,11 +380,13 @@ export default function StudentEvaluationApp() {
 
   function changeActiveView(view: AppView) {
     if (!confirmUnsavedChanges()) return;
+    setTableFullScreen(false);
     setActiveView(view);
   }
 
   function changeAssessmentTab(tab: AssessmentPageTab) {
     if (!confirmUnsavedChanges()) return;
+    setTableFullScreen(false);
     setAssessmentPageTab(tab);
   }
 
@@ -477,17 +486,8 @@ export default function StudentEvaluationApp() {
       dataType: draftField.isCalculated ? "calculated" : draftField.dataType,
       isRequired: false,
       isCalculated: draftField.isCalculated,
-      calculationKey: draftField.isCalculated ? draftField.calculationKey.trim() || "custom" : undefined,
-      calculationExpression: draftField.isCalculated ? draftField.calculationExpression.trim() : undefined,
-      calculationCondition: draftField.isCalculated
-        ? {
-            left: draftField.conditionLeft,
-            operator: draftField.conditionOperator,
-            right: draftField.conditionRight,
-            joinOperator: draftField.conditionJoinOperator,
-            extra: draftField.conditionExtra
-          }
-        : undefined,
+      calculationKey: draftField.isCalculated ? draftField.calculationKey : undefined,
+      calculationExpression: undefined,
       letterRanks: draftField.dataType === "letter" ? draftField.letterRanks.trim() : undefined,
       roundIds: draftField.selectedRoundIds.length ? draftField.selectedRoundIds : undefined,
       sectionIds: draftField.selectedSectionIds.length ? draftField.selectedSectionIds : undefined,
@@ -505,13 +505,7 @@ export default function StudentEvaluationApp() {
       name: "",
       dataType: "integer",
       isCalculated: false,
-      calculationKey: "custom",
-      calculationExpression: "",
-      conditionLeft: "median",
-      conditionOperator: "<",
-      conditionRight: "50",
-      conditionJoinOperator: "",
-      conditionExtra: "",
+      calculationKey: defaultCalculationKey as string,
       letterRanks: "",
       selectedRoundIds: [],
       selectedSectionIds: []
@@ -769,9 +763,16 @@ export default function StudentEvaluationApp() {
   }
 
   const builderScrollMode = activeView === "assessment" && assessmentPageTab === "builder";
+  const appShellClasses = [
+    "app-shell",
+    builderScrollMode ? "builder-scroll-mode" : "",
+    tableFullScreen ? "table-fullscreen-mode" : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
-    <main className={builderScrollMode ? "app-shell builder-scroll-mode" : "app-shell"}>
+    <main className={appShellClasses}>
       <aside className="sidebar">
         <div className="brand-block">
           <span>Student Evaluations</span>
@@ -903,6 +904,8 @@ export default function StudentEvaluationApp() {
                 saveMessage={saveMessage}
                 onSave={saveTablesToFirebase}
                 markUnsaved={markUnsaved}
+                fullScreen={tableFullScreen}
+                onToggleFullScreen={() => setTableFullScreen((current) => !current)}
               />
             )}
           </section>
@@ -936,6 +939,8 @@ export default function StudentEvaluationApp() {
             saveStatus={saveStatus}
             saveMessage={saveMessage}
             onSave={saveTablesToFirebase}
+            fullScreen={tableFullScreen}
+            onToggleFullScreen={() => setTableFullScreen((current) => !current)}
             onLockChange={(locked) => {
               setLockedOverviewYears((current) =>
                 locked
@@ -956,9 +961,9 @@ export default function StudentEvaluationApp() {
             }}
           />
         ) : activeView === "dashboard" ? (
-          <Dashboard rows={orfRows} templates={templates} />
+          <Dashboard rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} />
         ) : activeView === "report" ? (
-          <StudentReport rows={orfRows} recordAudit={recordAudit} />
+          <StudentReport rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} recordAudit={recordAudit} />
         ) : activeView === "files" ? (
           <ReportFiles rows={orfRows} reports={uploadedReports} setReports={setUploadedReports} recordAudit={recordAudit} />
         ) : activeView === "profile" ? (
@@ -981,7 +986,7 @@ export default function StudentEvaluationApp() {
             onSave={saveTablesToFirebase}
           />
         ) : (
-          <Dashboard rows={orfRows} templates={templates} />
+          <Dashboard rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} />
         )}
       </section>
 
@@ -1119,8 +1124,6 @@ type AppAuditEvent = {
   createdAt: string;
   actor: string;
 };
-
-type EntryRow = OrfResultRow & Record<string, string | number | null>;
 
 function AuthScreen() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
@@ -1306,12 +1309,6 @@ function AssessmentBuilder({
     dataType: AssessmentDataType;
     isCalculated: boolean;
     calculationKey: string;
-    calculationExpression: string;
-    conditionLeft: string;
-    conditionOperator: string;
-    conditionRight: string;
-    conditionJoinOperator: string;
-    conditionExtra: string;
     letterRanks: string;
     selectedRoundIds: string[];
     selectedSectionIds: string[];
@@ -1322,12 +1319,6 @@ function AssessmentBuilder({
       dataType: AssessmentDataType;
       isCalculated: boolean;
       calculationKey: string;
-      calculationExpression: string;
-      conditionLeft: string;
-      conditionOperator: string;
-      conditionRight: string;
-      conditionJoinOperator: string;
-      conditionExtra: string;
       letterRanks: string;
       selectedRoundIds: string[];
       selectedSectionIds: string[];
@@ -1369,13 +1360,7 @@ function AssessmentBuilder({
       name: field.name,
       dataType: field.dataType === "calculated" ? "integer" : field.dataType,
       isCalculated: field.isCalculated,
-      calculationKey: field.calculationKey ?? "custom",
-      calculationExpression: field.calculationExpression ?? "",
-      conditionLeft: "median",
-      conditionOperator: "<",
-      conditionRight: "50",
-      conditionJoinOperator: "",
-      conditionExtra: "",
+      calculationKey: safeCalculationKey(field.calculationKey),
       letterRanks: field.letterRanks ?? "",
       selectedRoundIds: field.roundIds ?? [],
       selectedSectionIds: field.sectionIds ?? []
@@ -1401,7 +1386,7 @@ function AssessmentBuilder({
               dataType: draftField.isCalculated ? "calculated" : draftField.dataType,
               isCalculated: draftField.isCalculated,
               calculationKey: draftField.isCalculated ? draftField.calculationKey : undefined,
-              calculationExpression: draftField.isCalculated ? draftField.calculationExpression : undefined,
+              calculationExpression: undefined,
               letterRanks: draftField.dataType === "letter" ? draftField.letterRanks : undefined,
               roundIds: draftField.selectedRoundIds.length ? draftField.selectedRoundIds : undefined,
               sectionIds: draftField.selectedSectionIds.length ? draftField.selectedSectionIds : undefined
@@ -1552,7 +1537,7 @@ function AssessmentBuilder({
               </div>
               <div className="field-row-tools">
                 <span className={`data-pill ${field.dataType}`}>{field.dataType}</span>
-                {field.isCalculated ? <span className="formula-pill">{field.calculationKey}</span> : null}
+                {field.isCalculated ? <span className="formula-pill">{calculationLabel(field.calculationKey)}</span> : null}
                 <div className="field-row-actions">
                   <button onClick={() => openEditField(field)} type="button" aria-label={`Edit ${field.name}`} title="Edit field">
                     ✎
@@ -1653,12 +1638,6 @@ function AddFieldModal({
     dataType: AssessmentDataType;
     isCalculated: boolean;
     calculationKey: string;
-    calculationExpression: string;
-    conditionLeft: string;
-    conditionOperator: string;
-    conditionRight: string;
-    conditionJoinOperator: string;
-    conditionExtra: string;
     letterRanks: string;
     selectedRoundIds: string[];
     selectedSectionIds: string[];
@@ -1672,6 +1651,8 @@ function AddFieldModal({
   const selectableSections = (selected.sections ?? []).filter(
     (section) => !draftField.selectedRoundIds.length || section.roundIds.some((roundId) => draftField.selectedRoundIds.includes(roundId))
   );
+  const selectedCalculation =
+    predefinedCalculations.find((calculation) => calculation.key === draftField.calculationKey) ?? predefinedCalculations[0];
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Add assessment field">
@@ -1746,85 +1727,14 @@ function AddFieldModal({
                 value={draftField.calculationKey}
                 onChange={(event) => setDraftField((field) => ({ ...field, calculationKey: event.target.value }))}
               >
-                {savedCalculations.map((calculation) => (
-                  <option key={calculation} value={calculation}>
-                    {calculation === "custom" ? "Custom calculation" : calculation}
+                {predefinedCalculations.map((calculation) => (
+                  <option key={calculation.key} value={calculation.key}>
+                    {calculation.label}
                   </option>
                 ))}
               </select>
             </label>
-
-            {draftField.calculationKey === "custom" ? (
-              <label>
-                Custom calculation
-                <input
-                  placeholder="Example: MEDIAN(fall_wpm, winter_wpm)"
-                  value={draftField.calculationExpression}
-                  onChange={(event) =>
-                    setDraftField((field) => ({ ...field, calculationExpression: event.target.value }))
-                  }
-                />
-              </label>
-            ) : null}
-
-            <div className="condition-grid">
-              <label>
-                If
-                <input
-                  value={draftField.conditionLeft}
-                  onChange={(event) => setDraftField((field) => ({ ...field, conditionLeft: event.target.value }))}
-                />
-              </label>
-              <label>
-                Operator
-                <select
-                  value={draftField.conditionOperator}
-                  onChange={(event) =>
-                    setDraftField((field) => ({ ...field, conditionOperator: event.target.value }))
-                  }
-                >
-                  {conditionOperators.map((operator) => (
-                    <option key={operator} value={operator}>
-                      {operator}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Value / field
-                <input
-                  value={draftField.conditionRight}
-                  onChange={(event) => setDraftField((field) => ({ ...field, conditionRight: event.target.value }))}
-                />
-              </label>
-              <label>
-                Optional operator
-                <select
-                  value={draftField.conditionJoinOperator}
-                  onChange={(event) =>
-                    setDraftField((field) => ({ ...field, conditionJoinOperator: event.target.value }))
-                  }
-                >
-                  <option value="">None</option>
-                  {conditionOperators.map((operator) => (
-                    <option key={operator} value={operator}>
-                      {operator}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Optional field
-                <input
-                  value={draftField.conditionExtra}
-                  onChange={(event) => setDraftField((field) => ({ ...field, conditionExtra: event.target.value }))}
-                />
-              </label>
-            </div>
-
-            <button className="small-action condition-save" onClick={() => validateCondition(draftField)} type="button">
-              Save condition
-            </button>
+            <p className="calculation-help">{selectedCalculation.description}</p>
           </div>
         ) : null}
 
@@ -1945,7 +1855,9 @@ function InlineEntryTable({
   saveStatus,
   saveMessage,
   onSave,
-  markUnsaved
+  markUnsaved,
+  fullScreen,
+  onToggleFullScreen
 }: {
   rows: OrfResultRow[];
   setRows: React.Dispatch<React.SetStateAction<OrfResultRow[]>>;
@@ -1962,8 +1874,14 @@ function InlineEntryTable({
   saveMessage: string;
   onSave: () => Promise<void>;
   markUnsaved: (message?: string) => void;
+  fullScreen: boolean;
+  onToggleFullScreen: () => void;
 }) {
-  const rowData = useMemo(() => buildEntryRows(rows, selected), [rows, selected]);
+  const assessmentContext = useMemo(
+    () => ({ schoolYear: selectedYear, grade: selectedGrade }),
+    [selectedGrade, selectedYear]
+  );
+  const rowData = useMemo(() => buildEntryRows(rows, selected, assessmentContext), [assessmentContext, rows, selected]);
   const columnDefs = useMemo<ColDef<EntryRow>[]>(
     () => [
       { field: "homeroom", headerName: "HR", pinned: "left", width: 90, filter: true },
@@ -1979,40 +1897,35 @@ function InlineEntryTable({
   );
 
   function onCellValueChanged(event: CellValueChangedEvent<EntryRow>) {
-    if (!event.data || event.oldValue === event.newValue || !event.colDef.field) return;
+    const fieldName = event.column.getColId();
+    if (!event.data || !fieldName || event.oldValue === event.newValue) return;
     recordAudit(
       "Edited score",
       "Assessment result",
-      `${event.data.student} / ${event.colDef.headerName ?? event.colDef.field}`,
-      `Changed ${event.colDef.field} from ${event.oldValue ?? "-"} to ${event.newValue ?? "-"}.`
+      `${event.data.student} / ${event.colDef.headerName ?? fieldName}`,
+      `Changed ${fieldName} from ${event.oldValue ?? "-"} to ${event.newValue ?? "-"}.`
     );
     markUnsaved("Assessment table changed. Save to keep the table changes.");
 
-    if (selected.id !== "orf") return;
-    const fieldName = event.colDef.field;
+    const sourceRow = rows.find((row) => row.id === event.data?.id);
+    if (sourceRow) {
+      const updatedRow = updateAssessmentRowFromTableEdit(sourceRow, selected, fieldName, event.newValue, assessmentContext);
+      event.node.setData(buildEntryRows([updatedRow], selected, assessmentContext)[0]);
+      event.api.refreshCells({ rowNodes: [event.node], force: true });
+    }
     setRows((current) =>
       current.map((row) =>
         row.id === event.data?.id
-          ? hydrateOrfRow({
-              id: row.id,
-              homeroom: row.homeroom,
-              student: row.student,
-              septP1Wpm: fieldName === "fall_wpm" ? toNumber(event.newValue) : row.septP1Wpm,
-              septP1Epm: fieldName === "fall_epm" ? toNumber(event.newValue) : row.septP1Epm,
-              septP2Wpm: row.septP2Wpm,
-              septP2Epm: row.septP2Epm,
-              septP3Wpm: row.septP3Wpm,
-              septP3Epm: row.septP3Epm
-            })
+          ? updateAssessmentRowFromTableEdit(row, selected, fieldName, event.newValue, assessmentContext)
           : row
       )
     );
   }
 
   return (
-    <section className="panel entry-panel">
+    <section className={fullScreen ? "panel entry-panel table-card-fullscreen" : "panel entry-panel"}>
       <div className="entry-heading">
-        <div>
+        <div className="entry-title-block">
           <p className="eyebrow">Evaluator Entry</p>
           <h2>{selected.name}</h2>
         </div>
@@ -2038,6 +1951,9 @@ function InlineEntryTable({
               ))}
             </select>
           </label>
+          <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
+            {fullScreen ? "Exit full screen" : "Full screen"}
+          </button>
         </div>
       </div>
 
@@ -2111,6 +2027,8 @@ function VpOverview({
   saveStatus,
   saveMessage,
   onSave,
+  fullScreen,
+  onToggleFullScreen,
   onLockChange
 }: {
   rows: OrfResultRow[];
@@ -2134,6 +2052,8 @@ function VpOverview({
   saveStatus: SaveStatus;
   saveMessage: string;
   onSave: () => Promise<void>;
+  fullScreen: boolean;
+  onToggleFullScreen: () => void;
   onLockChange: (locked: boolean) => void;
 }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
@@ -2157,7 +2077,7 @@ function VpOverview({
             .map((round) => ({
               headerName: round.label,
               headerStyle: roundHeaderStyle(round),
-              children: columnsForRound(template, round, `${template.id}_${round.id}`, hiddenFieldIds, hiddenSectionIds)
+              children: columnsForRound(template, round, hiddenFieldIds, hiddenSectionIds)
             }))
         }))
     ],
@@ -2195,7 +2115,7 @@ function VpOverview({
   }
 
   return (
-    <section className="overview-panel">
+    <section className={fullScreen ? "overview-panel table-card-fullscreen" : "overview-panel"}>
       <div className="panel overview-table-panel">
         <div className="overview-toolbar">
           <label>
@@ -2252,6 +2172,10 @@ function VpOverview({
 
           <button className={locked ? "small-action muted-action" : "small-action"} onClick={toggleLock} type="button">
             {locked ? "Unlock" : "Lock"}
+          </button>
+
+          <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
+            {fullScreen ? "Exit full screen" : "Full screen"}
           </button>
         </div>
 
@@ -2318,59 +2242,154 @@ function VpOverview({
   );
 }
 
-function Dashboard({ rows, templates }: { rows: OrfResultRow[]; templates: AssessmentTemplate[] }) {
-  const [studentId, setStudentId] = useState("all");
-  const [assessmentId, setAssessmentId] = useState("all");
-  const [year, setYear] = useState(dashboardYears[0]);
+function Dashboard({
+  rows,
+  placements,
+  templates,
+  schoolYears
+}: {
+  rows: OrfResultRow[];
+  placements: StudentPlacement[];
+  templates: AssessmentTemplate[];
+  schoolYears: string[];
+}) {
+  const [homeroom, setHomeroom] = useState("all");
+  const [studentKey, setStudentKey] = useState("all");
+  const [assessmentId, setAssessmentId] = useState(templates[0]?.id ?? "all");
+  const selectedAssessment = templates.find((template) => template.id === assessmentId) ?? templates[0];
+  const [fieldId, setFieldId] = useState(selectedAssessment?.fields[0]?.id ?? "");
+  const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
+  const [yearPickerOpen, setYearPickerOpen] = useState(false);
+  const allYearsSelected = selectedYears.length === schoolYears.length;
+  const yearPickerLabel = allYearsSelected
+    ? "All Years"
+    : selectedYears.length === 1
+      ? selectedYears[0]
+      : selectedYears.length
+        ? `${selectedYears.length} Years`
+        : "No Years";
 
-  const filteredRows = useMemo(() => {
-    return studentId === "all" ? rows : rows.filter((row) => row.id === studentId);
-  }, [rows, studentId]);
+  const selectedYearPlacements = useMemo(
+    () => placements.filter((placement) => selectedYears.includes(placement.schoolYear)),
+    [placements, selectedYears]
+  );
+  const dashboardPlacements = useMemo(
+    () =>
+      selectedYearPlacements.filter((placement) => homeroom === "all" || placement.homeroom === homeroom),
+    [homeroom, selectedYearPlacements]
+  );
+  const homerooms = useMemo(
+    () => Array.from(new Set(selectedYearPlacements.map((placement) => placement.homeroom))).sort(),
+    [selectedYearPlacements]
+  );
+  const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
+  const availableStudents = useMemo(() => {
+    const seen = new Set<string>();
+    return dashboardPlacements
+      .map((placement) => rowsById.get(placement.studentId))
+      .filter((row): row is OrfResultRow => {
+        if (!row) return false;
+        const key = dashboardStudentKey(row);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((first, second) => first.student.localeCompare(second.student));
+  }, [dashboardPlacements, rowsById]);
+
+  useEffect(() => {
+    if (!selectedAssessment) return;
+    if (!selectedAssessment.fields.some((field) => field.id === fieldId)) {
+      setFieldId(selectedAssessment.fields[0]?.id ?? "");
+    }
+  }, [fieldId, selectedAssessment]);
+
+  useEffect(() => {
+    if (studentKey !== "all" && !availableStudents.some((row) => dashboardStudentKey(row) === studentKey)) {
+      setStudentKey("all");
+    }
+  }, [availableStudents, studentKey]);
+
+  const filteredPlacements = useMemo(
+    () =>
+      dashboardPlacements.filter((placement) => {
+        if (studentKey === "all") return true;
+        const row = rowsById.get(placement.studentId);
+        return row ? dashboardStudentKey(row) === studentKey : false;
+      }),
+    [dashboardPlacements, rowsById, studentKey]
+  );
 
   const chartData = useMemo(() => {
-    const medians = filteredRows
-      .map((row) => row.septMedian)
-      .filter((value): value is number => typeof value === "number");
-    const baseAverage = medians.length
-      ? Math.round((medians.reduce((total, value) => total + value, 0) / medians.length) * 10) / 10
-      : 0;
-    const assessmentOffset = assessmentId === "all" ? 0 : templates.findIndex((template) => template.id === assessmentId) * 4;
-    const yearOffset = dashboardYears.indexOf(year) * -3;
-
-    return [
-      { round: "Fall", averageMedian: Math.max(0, baseAverage + assessmentOffset + yearOffset) },
-      { round: "Winter", averageMedian: Math.max(0, baseAverage + 8 + assessmentOffset + yearOffset) },
-      { round: "Spring", averageMedian: Math.max(0, baseAverage + 14 + assessmentOffset + yearOffset) }
-    ];
-  }, [assessmentId, filteredRows, templates, year]);
+    if (!selectedAssessment) return [];
+    const selectedField = selectedAssessment.fields.find((field) => field.id === fieldId) ?? selectedAssessment.fields[0];
+    return selectedYears
+      .slice()
+      .sort(compareSchoolYears)
+      .flatMap((year) =>
+        selectedAssessment.rounds.map((round, roundIndex) => {
+          const showYearLabel = roundIndex === Math.floor(selectedAssessment.rounds.length / 2);
+          return {
+            axisKey: `${windowIndicatorForRound(round)}|${showYearLabel ? year : ""}|${year}-${round.id}`,
+            year,
+            window: round.label,
+            color: round.color ?? "#101820",
+            averageScore: averageDashboardFieldValue(
+              filteredPlacements,
+              rowsById,
+              selectedAssessment,
+              round,
+              selectedField,
+              roundIndex,
+              year
+            )
+          };
+        })
+      );
+  }, [fieldId, filteredPlacements, rowsById, selectedAssessment, selectedYears]);
 
   const homeroomData = useMemo(() => {
-    return Array.from(new Set(filteredRows.map((row) => row.homeroom))).map((homeroom) => {
-      const homeroomRows = filteredRows.filter((row) => row.homeroom === homeroom);
+    return Array.from(new Set(filteredPlacements.map((placement) => placement.homeroom))).map((homeroom) => {
+      const homeroomRows = filteredPlacements
+        .filter((placement) => placement.homeroom === homeroom)
+        .map((placement) => rowsById.get(placement.studentId))
+        .filter((row): row is OrfResultRow => Boolean(row));
       return {
         homeroom,
         watch: homeroomRows.filter((row) => typeof row.septMedian === "number" && row.septMedian < 50).length,
         total: homeroomRows.length
       };
     });
-  }, [filteredRows]);
+  }, [filteredPlacements, rowsById]);
+
+  function toggleDashboardYear(year: string) {
+    setSelectedYears((current) =>
+      current.includes(year) ? current.filter((selectedYear) => selectedYear !== year) : [...current, year]
+    );
+  }
 
   return (
     <section className="dashboard-layout">
-      <div className="panel dashboard-hero">
-        <p className="eyebrow">Dashboard</p>
-        <h2>Assessment Trends</h2>
-        <p>Use filters to focus the charts on a student, assessment, and school year.</p>
-      </div>
-
       <div className="panel dashboard-filters">
         <label>
+          Home room
+          <select value={homeroom} onChange={(event) => setHomeroom(event.target.value)}>
+            <option value="all">All home rooms</option>
+            {homerooms.map((room) => (
+              <option key={room} value={room}>
+                {room}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
           Student
-          <select value={studentId} onChange={(event) => setStudentId(event.target.value)}>
+          <select value={studentKey} onChange={(event) => setStudentKey(event.target.value)}>
             <option value="all">All students</option>
-            {rows.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.student} / {row.homeroom}
+            {availableStudents.map((row) => (
+              <option key={dashboardStudentKey(row)} value={dashboardStudentKey(row)}>
+                {row.student}
               </option>
             ))}
           </select>
@@ -2379,7 +2398,6 @@ function Dashboard({ rows, templates }: { rows: OrfResultRow[]; templates: Asses
         <label>
           Assessment
           <select value={assessmentId} onChange={(event) => setAssessmentId(event.target.value)}>
-            <option value="all">All assessments</option>
             {templates.map((template) => (
               <option key={template.id} value={template.id}>
                 {template.name}
@@ -2389,30 +2407,57 @@ function Dashboard({ rows, templates }: { rows: OrfResultRow[]; templates: Asses
         </label>
 
         <label>
-          Year
-          <select value={year} onChange={(event) => setYear(event.target.value)}>
-            {dashboardYears.map((schoolYear) => (
-              <option key={schoolYear} value={schoolYear}>
-                {schoolYear}
+          Field
+          <select value={fieldId} onChange={(event) => setFieldId(event.target.value)}>
+            {(selectedAssessment?.fields ?? []).map((field) => (
+              <option key={field.id} value={field.id}>
+                {field.name}
               </option>
             ))}
           </select>
         </label>
+
+        <div className="dashboard-year-picker">
+          <span>Year</span>
+          <button className="picker-field-button" onClick={() => setYearPickerOpen((open) => !open)} type="button">
+            <span>{yearPickerLabel}</span>
+            <span className="dropdown-arrow" aria-hidden="true" />
+          </button>
+
+          {yearPickerOpen ? (
+            <div className="dashboard-year-menu">
+              <label className="checkbox-row select-all-row">
+                <input
+                  checked={allYearsSelected}
+                  onChange={() => setSelectedYears(allYearsSelected ? [] : schoolYears)}
+                  type="checkbox"
+                />
+                All Years
+              </label>
+              {schoolYears.map((schoolYear) => (
+                <label className="checkbox-row" key={schoolYear}>
+                  <input checked={selectedYears.includes(schoolYear)} onChange={() => toggleDashboardYear(schoolYear)} type="checkbox" />
+                  {schoolYear}
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className="panel chart-panel">
         <div className="panel-heading">
           <p className="eyebrow">Progression</p>
-          <h2>Average score by round</h2>
+          <h2>Average field score by year and window</h2>
         </div>
         <div className="chart-frame">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="round" />
+              <XAxis dataKey="axisKey" height={66} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
               <YAxis allowDecimals={false} />
               <Tooltip />
-              <Line type="monotone" dataKey="averageMedian" stroke="#101820" strokeWidth={3} dot={{ r: 5 }} />
+              <Line connectNulls type="monotone" dataKey="averageScore" stroke="#101820" strokeWidth={3} dot={<DashboardDot />} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -2438,6 +2483,94 @@ function Dashboard({ rows, templates }: { rows: OrfResultRow[]; templates: Asses
       </div>
     </section>
   );
+}
+
+function DashboardAxisTick(props: { x?: number; y?: number; payload?: { value?: string } }) {
+  if (typeof props.x !== "number" || typeof props.y !== "number") return null;
+  const [windowLabel = "", yearLabel = ""] = String(props.payload?.value ?? "").split("|");
+
+  return (
+    <g transform={`translate(${props.x},${props.y})`}>
+      <text x={0} y={8} textAnchor="middle" fill="#101820" fontSize={12} fontWeight={800}>
+        {windowLabel}
+      </text>
+      <text x={0} y={26} textAnchor="middle" fill="#66707c" fontSize={11} fontWeight={700}>
+        {yearLabel}
+      </text>
+    </g>
+  );
+}
+
+function DashboardDot(props: { cx?: number; cy?: number; payload?: { color?: string } }) {
+  if (typeof props.cx !== "number" || typeof props.cy !== "number") return null;
+  return (
+    <circle
+      cx={props.cx}
+      cy={props.cy}
+      r={5}
+      fill={props.payload?.color ?? "#101820"}
+      stroke="#101820"
+      strokeWidth={1.5}
+    />
+  );
+}
+
+function averageDashboardFieldValue(
+  placements: StudentPlacement[],
+  rowsById: Map<string, OrfResultRow>,
+  template: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  field: AssessmentFieldTemplate | undefined,
+  roundIndex: number,
+  schoolYear: string
+) {
+  const yearPlacements = placements.filter((placement) => placement.schoolYear === schoolYear);
+  if (!field || !yearPlacements.length) return null;
+  const sectionsForRound = sectionsForAssessmentRound(template, round).filter((section) => field.sectionIds?.includes(section.id));
+  const values = yearPlacements
+    .flatMap((placement) => {
+      const row = rowsById.get(placement.studentId);
+      if (!row) return [];
+      const context = { schoolYear: placement.schoolYear, grade: placement.grade };
+      if (sectionsForRound.length) {
+        return sectionsForRound.map((section) => entryValue(row, template, round, field, section, context));
+      }
+      return [entryValue(row, template, round, field, undefined, context)];
+    })
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  if (!values.length) return null;
+  return Math.round((values.reduce((total, value) => total + value, 0) / values.length) * 10) / 10;
+}
+
+function compareSchoolYears(left: string, right: string) {
+  return schoolYearStart(left) - schoolYearStart(right);
+}
+
+function windowIndicatorForRound(round: AssessmentRoundTemplate) {
+  const labelParts = round.label.split("/");
+  return labelParts.length > 1 ? labelParts[labelParts.length - 1].trim() : round.month;
+}
+
+function schoolYearStart(year: string) {
+  const start = Number(year.split("-")[0]);
+  return Number.isFinite(start) ? start : 0;
+}
+
+function dashboardStudentKey(row: OrfResultRow) {
+  return normalizeStudentName(row.student);
+}
+
+function uniqueDashboardStudents(rows: OrfResultRow[]) {
+  const seen = new Set<string>();
+  return rows
+    .filter((row) => {
+      const key = dashboardStudentKey(row);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((first, second) => first.student.localeCompare(second.student));
 }
 
 function ProfilePage({
@@ -2744,39 +2877,61 @@ function InviteModal({ onClose, onInvite }: { onClose: () => void; onInvite: (em
   );
 }
 
-function StudentReport({ rows, recordAudit }: { rows: OrfResultRow[]; recordAudit: RecordAudit }) {
-  const [studentId, setStudentId] = useState(rows[0]?.id ?? "");
-  const selectedStudent = rows.find((row) => row.id === studentId) ?? rows[0];
-
-  const reportText = selectedStudent
-    ? [
-        "Student Assessment Report",
-        "",
-        `Student: ${selectedStudent.student}`,
-        `Homeroom: ${selectedStudent.homeroom}`,
-        "Assessment: Oral Reading Fluency",
-        "Round: September / Fall",
-        "",
-        `Passage 1: WPM ${selectedStudent.septP1Wpm ?? "-"}, EPM ${selectedStudent.septP1Epm ?? "-"}, CWPM ${selectedStudent.septP1Cwpm ?? "-"}`,
-        `Passage 2: WPM ${selectedStudent.septP2Wpm ?? "-"}, EPM ${selectedStudent.septP2Epm ?? "-"}, CWPM ${selectedStudent.septP2Cwpm ?? "-"}`,
-        `Passage 3: WPM ${selectedStudent.septP3Wpm ?? "-"}, EPM ${selectedStudent.septP3Epm ?? "-"}, CWPM ${selectedStudent.septP3Cwpm ?? "-"}`,
-        "",
-        `Median: ${selectedStudent.septMedian ?? "-"}`,
-        `Percentile: ${selectedStudent.septPercentile ?? "-"}`,
-        `Status: ${selectedStudent.septMedian !== null && selectedStudent.septMedian < 50 ? "Watch" : "On track"}`
-      ].join("\n")
+function StudentReport({
+  rows,
+  placements,
+  templates,
+  schoolYears,
+  recordAudit
+}: {
+  rows: OrfResultRow[];
+  placements: StudentPlacement[];
+  templates: AssessmentTemplate[];
+  schoolYears: string[];
+  recordAudit: RecordAudit;
+}) {
+  const [studentKey, setStudentKey] = useState(rows[0] ? dashboardStudentKey(rows[0]) : "");
+  const [assessmentId, setAssessmentId] = useState(templates[0]?.id ?? "");
+  const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
+  const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
+  const reportStudents = useMemo(() => uniqueDashboardStudents(rows), [rows]);
+  const selectedStudent = reportStudents.find((row) => dashboardStudentKey(row) === studentKey) ?? reportStudents[0];
+  const selectedStudentKey = selectedStudent ? dashboardStudentKey(selectedStudent) : "";
+  const selectedTemplate = templates.find((template) => template.id === assessmentId) ?? templates[0];
+  const allYearsSelected = selectedYears.length === schoolYears.length;
+  const reportRows = useMemo(
+    () =>
+      selectedStudent && selectedTemplate
+        ? studentReportRows(selectedStudentKey, selectedStudent.student, selectedTemplate, selectedYears, placements, rowsById)
+        : [],
+    [placements, rowsById, selectedStudent, selectedStudentKey, selectedTemplate, selectedYears]
+  );
+  const reportText = selectedStudent && selectedTemplate
+    ? studentReportText(selectedStudent.student, selectedTemplate, selectedYears, reportRows)
     : "";
 
-  function downloadReport() {
-    if (!selectedStudent) return;
-    const blob = new Blob([reportText], { type: "text/plain;charset=utf-8" });
+  function toggleReportYear(year: string) {
+    setSelectedYears((current) =>
+      current.includes(year) ? current.filter((selectedYear) => selectedYear !== year) : [...current, year]
+    );
+  }
+
+  function downloadCsvReport() {
+    if (!selectedStudent || !selectedTemplate || !selectedYears.length) return;
+    const csv = studentReportCsv(reportRows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${selectedStudent.student}-assessment-report.txt`;
+    link.download = `${safeFileName(`${selectedStudent.student}-${selectedTemplate.name}-assessment-report`)}.csv`;
     link.click();
     URL.revokeObjectURL(url);
-    recordAudit("Downloaded report", "Student report", selectedStudent.student, "Generated and downloaded an individual assessment summary.");
+    recordAudit(
+      "Downloaded report",
+      "Student report",
+      selectedStudent.student,
+      `Generated a CSV report for ${selectedTemplate.name} across ${selectedYears.join(", ")}.`
+    );
   }
 
   return (
@@ -2788,17 +2943,45 @@ function StudentReport({ rows, recordAudit }: { rows: OrfResultRow[]; recordAudi
 
         <label>
           Student
-          <select value={studentId} onChange={(event) => setStudentId(event.target.value)}>
-            {rows.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.student} / {row.homeroom}
+          <select value={selectedStudentKey} onChange={(event) => setStudentKey(event.target.value)}>
+            {reportStudents.map((row) => (
+              <option key={dashboardStudentKey(row)} value={dashboardStudentKey(row)}>
+                {row.student}
               </option>
             ))}
           </select>
         </label>
 
-        <button className="primary-action" onClick={downloadReport} type="button">
-          Download text report
+        <label>
+          Evaluation
+          <select value={assessmentId} onChange={(event) => setAssessmentId(event.target.value)}>
+            {templates.map((template) => (
+              <option key={template.id} value={template.id}>
+                {template.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="report-year-picker">
+          <label className="checkbox-row select-all-row">
+            <input
+              checked={allYearsSelected}
+              onChange={() => setSelectedYears(allYearsSelected ? [] : schoolYears)}
+              type="checkbox"
+            />
+            Select all years
+          </label>
+          {schoolYears.map((year) => (
+            <label className="checkbox-row" key={year}>
+              <input checked={selectedYears.includes(year)} onChange={() => toggleReportYear(year)} type="checkbox" />
+              {year}
+            </label>
+          ))}
+        </div>
+
+        <button className="primary-action" disabled={!selectedYears.length} onClick={downloadCsvReport} type="button">
+          Download CSV report
         </button>
       </div>
 
@@ -2809,6 +2992,166 @@ function StudentReport({ rows, recordAudit }: { rows: OrfResultRow[]; recordAudi
       </div>
     </section>
   );
+}
+
+type StudentReportRow = {
+  year: string;
+  grade: string;
+  homeroom: string;
+  student: string;
+  assessment: string;
+  window: string;
+  section: string;
+  field: string;
+  value: string;
+};
+
+function studentReportRows(
+  studentKey: string,
+  studentName: string,
+  template: AssessmentTemplate,
+  selectedYears: string[],
+  placements: StudentPlacement[],
+  rowsById: Map<string, OrfResultRow>
+): StudentReportRow[] {
+  const reportRows: StudentReportRow[] = [];
+
+  selectedYears
+    .slice()
+    .sort(compareSchoolYears)
+    .forEach((year) => {
+      const yearPlacements = placements
+        .filter((placement) => placement.schoolYear === year)
+        .filter((placement) => {
+          const row = rowsById.get(placement.studentId);
+          return row ? dashboardStudentKey(row) === studentKey : false;
+        });
+
+      yearPlacements.forEach((placement) => {
+        const student = rowsById.get(placement.studentId);
+        if (!student) return;
+        const context = { schoolYear: placement.schoolYear, grade: placement.grade };
+
+        template.rounds.forEach((round) => {
+          const sectionsForRound = sectionsForAssessmentRound(template, round);
+          const fieldsForRound = template.fields.filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id));
+
+          sectionsForRound.forEach((section) => {
+            fieldsForRound
+              .filter((field) => field.sectionIds?.includes(section.id))
+              .forEach((field) => {
+                reportRows.push({
+                  year,
+                  grade: placement.grade,
+                  homeroom: placement.homeroom,
+                  student: student.student,
+                  assessment: template.name,
+                  window: round.label,
+                  section: section.name,
+                  field: field.name,
+                  value: formatReportValue(entryValue(student, template, round, field, section, context))
+                });
+              });
+          });
+
+          fieldsForRound
+            .filter((field) => !field.sectionIds?.some((sectionId) => sectionsForRound.some((section) => section.id === sectionId)))
+            .forEach((field) => {
+              reportRows.push({
+                year,
+                grade: placement.grade,
+                homeroom: placement.homeroom,
+                student: student.student,
+                assessment: template.name,
+                window: round.label,
+                section: "",
+                field: field.name,
+                value: formatReportValue(entryValue(student, template, round, field, undefined, context))
+              });
+            });
+        });
+      });
+    });
+
+  if (!reportRows.length && selectedYears.length) {
+    return selectedYears.slice().sort(compareSchoolYears).map((year) => ({
+      year,
+      grade: "",
+      homeroom: "",
+      student: studentName,
+      assessment: template.name,
+      window: "",
+      section: "",
+      field: "No data",
+      value: ""
+    }));
+  }
+
+  return reportRows;
+}
+
+function studentReportText(studentName: string, template: AssessmentTemplate, selectedYears: string[], rows: StudentReportRow[]) {
+  const lines = [
+    "Student Assessment Report",
+    "",
+    `Student: ${studentName}`,
+    `Assessment: ${template.name}`,
+    `Years: ${selectedYears.length ? selectedYears.slice().sort(compareSchoolYears).join(", ") : "None selected"}`,
+    ""
+  ];
+
+  if (!rows.length) {
+    return [...lines, "No report data matches the current filters."].join("\n");
+  }
+
+  const groups = new Map<string, StudentReportRow[]>();
+  rows.forEach((row) => {
+    const key = [row.year, row.grade, row.homeroom].join("|");
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  });
+
+  groups.forEach((groupRows) => {
+    const first = groupRows[0];
+    lines.push(`${first.year}${first.grade ? ` / Grade ${first.grade}` : ""}${first.homeroom ? ` / ${first.homeroom}` : ""}`);
+    groupRows.forEach((row) => {
+      const label = [row.window, row.section, row.field].filter(Boolean).join(" / ");
+      lines.push(`  ${label}: ${row.value || "-"}`);
+    });
+    lines.push("");
+  });
+
+  return lines.join("\n").trimEnd();
+}
+
+function studentReportCsv(rows: StudentReportRow[]) {
+  const table = [
+    ["Year", "Grade", "Homeroom", "Student", "Assessment", "Window", "Section", "Field", "Value"],
+    ...rows.map((row) => [
+      row.year,
+      row.grade,
+      row.homeroom,
+      row.student,
+      row.assessment,
+      row.window,
+      row.section,
+      row.field,
+      row.value
+    ])
+  ];
+
+  return `\uFEFFsep=,\r\n${table.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+}
+
+function formatReportValue(value: unknown) {
+  return value === null || typeof value === "undefined" ? "" : String(value);
+}
+
+function csvCell(value: string) {
+  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, "\"\"")}"` : value;
+}
+
+function safeFileName(value: string) {
+  return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/\s+/g, " ").trim() || "student-assessment-report";
 }
 
 function StudentNotesModal({
@@ -3711,16 +4054,24 @@ function fieldColumn(
   assessment: AssessmentTemplate,
   round: AssessmentRoundTemplate,
   field: AssessmentFieldTemplate,
-  fieldScope = round.id,
+  section?: AssessmentSectionTemplate,
   extraCellClass = ""
 ): ColDef<EntryRow> {
-  const fieldName = tableFieldKey(fieldScope, field.slug);
+  const fieldName = assessmentValueKey(assessment, round, field, section);
   return {
-    field: fieldName,
+    colId: fieldName,
     headerName: field.name,
     width: field.name.length > 12 ? 150 : 104,
-    editable: !field.isCalculated && field.dataType !== "file",
+    editable: isEditableAssessmentField(assessment, field),
     cellEditor: field.dataType === "integer" || field.dataType === "percentage" ? "agNumberCellEditor" : undefined,
+    valueGetter: (params) => params.data?.[fieldName] ?? null,
+    valueSetter: (params) => {
+      if (!params.data) return false;
+      const nextValue = normalizedAssessmentValue(params.newValue, field);
+      if (params.data[fieldName] === nextValue) return false;
+      params.data[fieldName] = nextValue;
+      return true;
+    },
     valueParser: (params) =>
       field.dataType === "integer" || field.dataType === "percentage" ? toNumber(params.newValue) : params.newValue,
     cellClass: [field.isCalculated ? "locked-formula-cell" : "editable-score-cell", extraCellClass].filter(Boolean).join(" "),
@@ -3741,16 +4092,13 @@ function roundHeaderStyle(round: AssessmentRoundTemplate) {
 function columnsForRound(
   assessment: AssessmentTemplate,
   round: AssessmentRoundTemplate,
-  fieldScope = round.id,
   hiddenFieldIds: string[] = [],
   hiddenSectionIds: string[] = []
 ): ColDef<EntryRow>[] {
   const fieldsForRound = assessment.fields.filter(
     (field) => !hiddenFieldIds.includes(field.id) && (!field.roundIds?.length || field.roundIds.includes(round.id))
   );
-  const sectionsForRound = (assessment.sections ?? []).filter(
-    (section) => section.roundIds.includes(round.id) && !hiddenSectionIds.includes(section.id)
-  );
+  const sectionsForRound = sectionsForAssessmentRound(assessment, round).filter((section) => !hiddenSectionIds.includes(section.id));
   const sectionColumns: ColDef<EntryRow>[] = sectionsForRound
     .flatMap((section) => {
       const sectionFields = fieldsForRound.filter((field) => field.sectionIds?.includes(section.id));
@@ -3763,7 +4111,7 @@ function columnsForRound(
             assessment,
             round,
             field,
-            `${fieldScope}_${section.id}`,
+            section,
             index === sectionFields.length - 1 ? "hierarchy-boundary-cell" : ""
           )
         )
@@ -3778,7 +4126,7 @@ function columnsForRound(
         assessment,
         round,
         field,
-        fieldScope,
+        undefined,
         index === unsectionedFields.length - 1 ? "hierarchy-boundary-cell" : ""
       )
     )
@@ -3805,104 +4153,6 @@ function overviewColumnsFor(template: AssessmentTemplate): ColDef<EntryRow>[] {
     ];
   }
   return [{ field: "report_status", headerName: "Report", width: 130 }];
-}
-
-function buildEntryRows(rows: OrfResultRow[], selected: AssessmentTemplate): EntryRow[] {
-  return rows.map((row, index) => {
-    const entry: EntryRow = { ...row };
-    selected.rounds.forEach((round, roundIndex) => {
-      assignFieldValues(entry, row, selected, round, round.id, index, roundIndex);
-    });
-    return entry;
-  });
-}
-
-function buildOverviewRows(rows: OrfResultRow[], templates: AssessmentTemplate[]): EntryRow[] {
-  return rows.map((row, index) => {
-    const entry: EntryRow = { ...row };
-    templates.forEach((template) => {
-      template.rounds.forEach((round, roundIndex) => {
-        assignFieldValues(entry, row, template, round, `${template.id}_${round.id}`, index, roundIndex);
-      });
-    });
-    return entry;
-  });
-}
-
-function assignFieldValues(
-  entry: EntryRow,
-  row: OrfResultRow,
-  template: AssessmentTemplate,
-  round: AssessmentRoundTemplate,
-  fieldScope: string,
-  rowIndex: number,
-  roundIndex: number
-) {
-  const sectionsForRound = (template.sections ?? []).filter((section) => section.roundIds.includes(round.id));
-  template.fields
-    .filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id))
-    .forEach((field, fieldIndex) => {
-      const fieldSections = sectionsForRound.filter((section) => field.sectionIds?.includes(section.id));
-      if (fieldSections.length) {
-        fieldSections.forEach((section) => {
-          entry[tableFieldKey(`${fieldScope}_${section.id}`, field.slug)] = entryValue(row, template, round, field, rowIndex, roundIndex, fieldIndex);
-        });
-        return;
-      }
-      entry[tableFieldKey(fieldScope, field.slug)] = entryValue(row, template, round, field, rowIndex, roundIndex, fieldIndex);
-    });
-}
-
-function entryValue(
-  row: OrfResultRow,
-  assessment: AssessmentTemplate,
-  round: AssessmentRoundTemplate,
-  field: AssessmentFieldTemplate,
-  rowIndex: number,
-  roundIndex: number,
-  fieldIndex: number
-) {
-  const isNewPlaceholderStudent = row.id.startsWith("student-") && row.student.startsWith("New Student");
-  if (assessment.id === "orf" && round.id === "fall") {
-    if (field.slug === "wpm") return row.septP1Wpm;
-    if (field.slug === "epm") return row.septP1Epm;
-    if (field.slug === "cwpm") return row.septP1Cwpm;
-    if (field.slug === "median") return row.septMedian;
-    if (field.slug === "percentile") return row.septPercentile;
-  }
-  if (isNewPlaceholderStudent) {
-    return field.dataType === "file" || field.dataType === "letter" || field.dataType === "text" || field.dataType === "date" ? "" : null;
-  }
-  if (field.dataType === "file") return rowIndex % 2 === 0 ? "Attached" : "Needed";
-  if (field.dataType === "letter") return ["A", "B", "C"][rowIndex % 3];
-  if (field.dataType === "text") return "";
-  if (field.dataType === "date") return "";
-  return 20 + rowIndex * 4 + roundIndex * 6 + fieldIndex;
-}
-
-function tableFieldKey(roundId: string, fieldSlug: string) {
-  return `${roundId}_${fieldSlug}`.replace(/[^a-zA-Z0-9_]/g, "_");
-}
-
-function labelsForIds(items: Array<{ id: string; label?: string; name?: string }>, ids: string[]) {
-  return ids
-    .map((id) => {
-      const item = items.find((candidate) => candidate.id === id);
-      return item?.label ?? item?.name ?? id;
-    })
-    .join(", ");
-}
-
-function uniqueIds(ids: string[]) {
-  return Array.from(new Set(ids));
-}
-
-function fieldWindowSummary(template: AssessmentTemplate, field: AssessmentFieldTemplate) {
-  return field.roundIds?.length ? labelsForIds(template.rounds, field.roundIds) : "All windows";
-}
-
-function fieldSectionSummary(template: AssessmentTemplate, field: AssessmentFieldTemplate) {
-  return field.sectionIds?.length ? labelsForIds(template.sections ?? [], field.sectionIds) : "No sections";
 }
 
 function uniqueStudentNames(rows: OrfResultRow[]) {
@@ -3975,19 +4225,12 @@ function initialsFor(name: string) {
     .join("") || "U";
 }
 
-function validateCondition(condition: {
-  conditionOperator: string;
-  conditionJoinOperator: string;
-}) {
-  if (!comparisonOperators.includes(condition.conditionOperator)) {
-    window.alert("The final condition operator must be a comparison operator: <, >, =, or !=.");
-    return;
-  }
-  if (condition.conditionJoinOperator && comparisonOperators.includes(condition.conditionJoinOperator)) {
-    window.alert("Only the last operator can be a comparison operator.");
-    return;
-  }
-  window.alert("Condition saved.");
+function safeCalculationKey(key?: string): string {
+  return predefinedCalculations.find((calculation) => calculation.key === key)?.key ?? defaultCalculationKey;
+}
+
+function calculationLabel(key?: string) {
+  return predefinedCalculations.find((calculation) => calculation.key === key)?.label ?? key ?? "";
 }
 
 function viewTitle(view: AppView, assessmentName: string) {
@@ -4004,10 +4247,4 @@ function viewTitle(view: AppView, assessmentName: string) {
 
 function permissionLabel(permission: StudentNotePermission) {
   return permission === "admin_only" ? "Admin only" : "All";
-}
-
-function toNumber(value: unknown) {
-  if (value === "" || value === null || typeof value === "undefined") return null;
-  const numberValue = Number(value);
-  return Number.isFinite(numberValue) ? numberValue : null;
 }

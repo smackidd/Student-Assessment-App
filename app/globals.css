@@ -45,6 +45,25 @@ textarea {
   overflow: visible;
 }
 
+.app-shell.table-fullscreen-mode {
+  grid-template-columns: 1fr;
+}
+
+.table-fullscreen-mode .sidebar,
+.table-fullscreen-mode .topbar,
+.table-fullscreen-mode .assessment-page-tabs {
+  display: none;
+}
+
+.table-fullscreen-mode .workspace {
+  height: 100vh;
+  padding: 12px;
+}
+
+.table-fullscreen-mode .assessment-workspace {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .sidebar {
   min-height: 100vh;
   padding: 22px;
@@ -883,7 +902,7 @@ textarea {
 
 .entry-filters {
   display: grid;
-  grid-template-columns: minmax(150px, 220px) minmax(130px, 180px);
+  grid-template-columns: minmax(150px, 220px) minmax(130px, 180px) auto;
   gap: 12px;
   align-items: end;
   justify-content: end;
@@ -904,6 +923,39 @@ textarea {
 
 .entry-save-row .save-bar {
   margin-bottom: 0;
+}
+
+.fullscreen-action {
+  align-self: end;
+  height: 43px;
+  margin-top: 0;
+  white-space: nowrap;
+}
+
+.table-card-fullscreen {
+  height: 100%;
+}
+
+.table-card-fullscreen .entry-title-block,
+.table-card-fullscreen .entry-status,
+.table-card-fullscreen .overview-student-count,
+.table-card-fullscreen .overview-hint,
+.table-card-fullscreen .overview-empty.is-hidden {
+  display: none;
+}
+
+.table-card-fullscreen .entry-heading {
+  justify-content: end;
+}
+
+.table-card-fullscreen .entry-filters {
+  grid-template-columns: minmax(150px, 220px) minmax(130px, 180px) auto;
+  width: 100%;
+}
+
+.table-card-fullscreen .entry-save-row,
+.table-card-fullscreen .overview-save-row {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .entry-student-count {
@@ -1022,7 +1074,7 @@ textarea {
 
 .overview-toolbar {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) auto minmax(130px, 0.7fr) auto auto auto;
+  grid-template-columns: minmax(150px, 0.8fr) auto minmax(130px, 0.7fr) auto auto auto auto;
   gap: 12px;
   align-items: end;
   margin-bottom: 14px;
@@ -1030,6 +1082,15 @@ textarea {
 
 .overview-toolbar label {
   margin-top: 0;
+}
+
+.table-card-fullscreen .overview-toolbar {
+  grid-template-columns: minmax(150px, 220px) minmax(130px, 180px) auto;
+  justify-content: end;
+}
+
+.table-card-fullscreen .overview-toolbar button:not(.fullscreen-action) {
+  display: none;
 }
 
 .toolbar-action {
@@ -1137,31 +1198,69 @@ textarea {
 .dashboard-layout {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 16px;
 }
 
-.dashboard-hero,
 .dashboard-filters {
   grid-column: span 2;
+  align-self: start;
 }
 
 .dashboard-filters {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px 12px;
+  align-items: start;
 }
 
 .dashboard-filters label {
+  gap: 4px;
   margin-top: 0;
+  font-size: 0.78rem;
 }
 
-.dashboard-hero h2,
+.dashboard-filters select,
+.dashboard-filters .picker-field-button {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+.dashboard-filters select {
+  line-height: 1.1;
+}
+
+.dashboard-year-picker {
+  position: relative;
+  display: grid;
+  gap: 4px;
+}
+
+.dashboard-year-picker > span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.dashboard-year-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12;
+  width: min(240px, 100vw);
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 18px 42px rgba(16, 24, 32, 0.18);
+}
+
 .chart-panel h2 {
   margin-bottom: 8px;
-}
-
-.dashboard-hero p {
-  margin-bottom: 0;
 }
 
 .chart-frame {
@@ -1405,18 +1504,11 @@ textarea {
   background: var(--panel-2);
 }
 
-.condition-grid {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
-}
-
-.condition-grid label {
-  margin-top: 0;
-}
-
-.condition-save {
-  justify-self: start;
+.calculation-help {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.4;
 }
 
 .options-modal {
@@ -1532,6 +1624,16 @@ textarea {
   display: grid;
   grid-template-columns: 360px minmax(0, 1fr);
   gap: 16px;
+}
+
+.report-year-picker {
+  display: grid;
+  gap: 7px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
 }
 
 .files-controls {
@@ -1732,6 +1834,31 @@ textarea {
   }
 }
 
+@media (max-height: 799px) {
+  .app-shell {
+    min-height: 100vh;
+    height: auto;
+    overflow-y: auto;
+  }
+
+  .sidebar {
+    min-height: 100vh;
+  }
+
+  .workspace {
+    min-height: 100vh;
+    height: auto;
+    overflow: visible;
+  }
+
+  .assessment-workspace,
+  .entry-panel,
+  .overview-page,
+  .overview-table-card {
+    min-height: 640px;
+  }
+}
+
 @media (max-width: 720px) {
   .workspace,
   .sidebar {
@@ -1754,7 +1881,6 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .condition-grid,
   .options-grid,
   .audit-controls,
   .audit-table-row {
