@@ -18,7 +18,8 @@
     "react": "latest",
     "react-dom": "latest",
     "recharts": "latest",
-    "xlsx": "latest"
+    "xlsx": "latest",
+    "xlsx-js-style": "^1.2.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.60.0",

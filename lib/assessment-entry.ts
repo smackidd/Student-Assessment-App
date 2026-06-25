@@ -11,6 +11,7 @@ export type EntryRow = OrfResultRow & Record<string, AssessmentValue | Assessmen
 export type AssessmentValueContext = {
   schoolYear?: string;
   grade?: string;
+  cohortRows?: OrfResultRow[];
 };
 
 export function buildEntryRows(rows: OrfResultRow[], selected: AssessmentTemplate[], context?: AssessmentValueContext): EntryRow[];
@@ -23,9 +24,10 @@ export function buildEntryRows(
   const templates = Array.isArray(selected) ? selected : [selected];
   return rows.map((row) => {
     const entry: EntryRow = { ...row };
+    const rowContext = { ...context, cohortRows: context.cohortRows ?? rows };
     templates.forEach((template) => {
       template.rounds.forEach((round) => {
-        assignFieldValues(entry, row, template, round, context);
+        assignFieldValues(entry, row, template, round, rowContext);
       });
     });
     return entry;
@@ -77,6 +79,12 @@ export function entryValue(
   if (assessment.id === "orf" && field.isCalculated && meaning !== "cwpm") {
     return orfEntryValue(row, assessment, round, field, section, context);
   }
+  if (field.isCalculated && assessmentFieldMeaning(field) === "quick_write_percentile") {
+    return quickWriteEntryValue(row, assessment, round, field, section, context);
+  }
+  if (field.isCalculated && assessmentFieldMeaning(field) === "percentage") {
+    return percentageEntryValue(row, assessment, round, field, section, context);
+  }
 
   const storedValue = storedAssessmentValue(row, assessment, round, field, section, context);
   if (typeof storedValue !== "undefined") return storedValue;
@@ -89,6 +97,73 @@ export function entryValue(
   if (field.dataType === "text") return "";
   if (field.dataType === "date") return "";
   return null;
+}
+
+function quickWriteEntryValue(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  field: AssessmentFieldTemplate,
+  section: AssessmentSectionTemplate | undefined,
+  context: AssessmentValueContext
+) {
+  if (assessmentFieldMeaning(field) !== "quick_write_percentile") return null;
+  const cwsField = assessment.fields.find((candidate) => assessmentFieldMeaning(candidate) === "cws");
+  if (!cwsField) return null;
+
+  const cws = storedAssessmentNumber(row, assessment, round, cwsField, section, null, context);
+  if (typeof cws !== "number") return null;
+
+  const cohortScores = (context.cohortRows ?? [])
+    .map((cohortRow) => storedAssessmentNumber(cohortRow, assessment, round, cwsField, section, null, context))
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  return calculatePercentileRank(cws, cohortScores);
+}
+
+function calculatePercentileRank(score: number, cohortScores: number[]) {
+  if (!cohortScores.length) return null;
+  const below = cohortScores.filter((value) => value < score).length;
+  const equal = cohortScores.filter((value) => value === score).length;
+  return Math.round(((below + equal / 2) / cohortScores.length) * 100);
+}
+
+function percentageEntryValue(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  field: AssessmentFieldTemplate,
+  section: AssessmentSectionTemplate | undefined,
+  context: AssessmentValueContext
+) {
+  if (assessmentFieldMeaning(field) !== "percentage") return null;
+  const scoreField = matchingCalculationInputField(assessment, round, section, "score", field);
+  const totalField = matchingCalculationInputField(assessment, round, section, "total", field);
+  if (!scoreField || !totalField) return null;
+
+  const score = storedAssessmentNumber(row, assessment, round, scoreField, section, null, context);
+  const total = storedAssessmentNumber(row, assessment, round, totalField, section, null, context);
+  if (typeof score !== "number" || typeof total !== "number" || total === 0) return null;
+
+  return Math.round((score / total) * 1000) / 10;
+}
+
+function matchingCalculationInputField(
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  section: AssessmentSectionTemplate | undefined,
+  meaning: "score" | "total",
+  calculatedField: AssessmentFieldTemplate
+) {
+  const sectionsForRound = sectionsForAssessmentRound(assessment, round);
+  return assessment.fields
+    .filter((field) => field.id !== calculatedField.id && (!field.roundIds?.length || field.roundIds.includes(round.id)))
+    .find((field) => {
+      if (assessmentFieldMeaning(field) !== meaning) return false;
+      const fieldSections = sectionsForField(assessment, round, field, sectionsForRound);
+      if (section) return fieldSections.some((candidate) => candidate.id === section.id);
+      return fieldSections.length === 0;
+    });
 }
 
 export function isEditableAssessmentField(assessment: AssessmentTemplate, field: AssessmentFieldTemplate) {
@@ -360,9 +435,16 @@ function assessmentFieldMeaning(field: AssessmentFieldTemplate) {
 
   if (candidates.some((value) => value === "orf_cwpm" || value === "cwpm")) return "cwpm";
   if (candidates.some((value) => value === "median" || value === "med" || value === "orf_med")) return "median";
+  if (candidates.some((value) => value === "quick_write_percentile" || value === "quick_write_ile")) return "quick_write_percentile";
+  if (candidates.some((value) => value === "percentage" || value === "percent" || value === "pct")) return "percentage";
   if (candidates.some((value) => value === "orf_percentile" || value === "percentile" || value === "ile")) return "percentile";
   if (candidates.some((value) => value === "wpm")) return "wpm";
   if (candidates.some((value) => value === "epm")) return "epm";
+  if (candidates.some((value) => value === "tww")) return "tww";
+  if (candidates.some((value) => value === "wsc")) return "wsc";
+  if (candidates.some((value) => value === "cws")) return "cws";
+  if (candidates.some((value) => value === "score" || value.endsWith("_score"))) return "score";
+  if (candidates.some((value) => value === "total" || value.endsWith("_total"))) return "total";
   return field.id || field.slug;
 }
 

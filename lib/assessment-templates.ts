@@ -157,9 +157,10 @@ export const assessmentTemplates: AssessmentTemplate[] = [
         id: "quick-write-percentile",
         name: "%ile",
         slug: "percentile",
-        dataType: "percentage",
+        dataType: "calculated",
         isRequired: false,
-        isCalculated: false,
+        isCalculated: true,
+        calculationKey: "quick_write_percentile",
         visibility: "evaluators"
       }
     ]
@@ -233,3 +234,29 @@ export const emptyCustomTemplate: AssessmentTemplate = {
   sections: [],
   fields: []
 };
+
+export function normalizeAssessmentTemplates(templates: AssessmentTemplate[]) {
+  return templates.map((template) => {
+    if (template.id !== "quick-write") return template;
+
+    return {
+      ...template,
+      fields: template.fields.map((field) => {
+        const isQuickWritePercentile =
+          field.calculationKey === "quick_write_percentile" ||
+          field.id === "quick-write-percentile" ||
+          field.slug === "percentile" ||
+          field.name.trim().toLowerCase() === "%ile";
+
+        return isQuickWritePercentile
+          ? {
+              ...field,
+              dataType: "calculated" as const,
+              isCalculated: true,
+              calculationKey: "quick_write_percentile"
+            }
+          : field;
+      })
+    };
+  });
+}

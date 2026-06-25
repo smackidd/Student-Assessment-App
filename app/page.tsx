@@ -1,17 +1,19 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AgGridReact } from "ag-grid-react";
 import {
   AllCommunityModule,
   ModuleRegistry,
+  type CellFocusedEvent,
   type CellValueChangedEvent,
-  type ColDef
+  type CellPosition,
+  type ColDef,
+  type Column,
+  type TabToNextCellParams
 } from "ag-grid-community";
 import {
-  Bar,
-  BarChart,
   CartesianGrid,
   Line,
   LineChart,
@@ -20,6 +22,7 @@ import {
   XAxis,
   YAxis
 } from "recharts";
+import * as XLSX from "xlsx-js-style";
 import {
   createUserWithEmailAndPassword,
   EmailAuthProvider,
@@ -35,6 +38,7 @@ import {
 import {
   assessmentTemplates,
   emptyCustomTemplate,
+  normalizeAssessmentTemplates,
   type AssessmentDataType,
   type AssessmentFieldTemplate,
   type AssessmentRoundTemplate,
@@ -80,6 +84,16 @@ const predefinedCalculations = [
     key: "orf_percentile",
     label: "ORF_Percentile",
     description: "Applies the ORF percentile to the current window only when the current window MED is below 50."
+  },
+  {
+    key: "quick_write_percentile",
+    label: "Quick Write %ile",
+    description: "Percentile-ranks Quick Write CWS within the current year, grade, and assessment window cohort."
+  },
+  {
+    key: "percentage",
+    label: "Percentage",
+    description: "Calculates Score divided by Total in the current section, then multiplies by 100."
   }
 ] as const;
 const defaultCalculationKey = predefinedCalculations[0].key;
@@ -105,6 +119,12 @@ type ProfilePageTab = "profile" | "password" | "audit" | "team";
 type StudentNotePermission = "admin_only" | "all";
 type SaveStatus = "saved" | "dirty" | "saving" | "error";
 type RecordAudit = (eventType: string, entityType: string, entityLabel: string, description: string) => void;
+type DefaultValueTarget = {
+  fieldName: string;
+  field: AssessmentFieldTemplate;
+  label: string;
+  scaleCodes: string[];
+};
 type OverviewDialog =
   | { type: "add" }
   | { type: "move"; studentId: string }
@@ -262,11 +282,13 @@ export default function StudentEvaluationApp() {
         const savedState = await loadPrototypeWorkspaceState();
         if (cancelled) return;
         if (savedState) {
+          const normalizedTemplates = normalizeAssessmentTemplates(savedState.templates);
+          const normalizedSavedState = { ...savedState, templates: normalizedTemplates };
           setOrfRows(savedState.rows);
           setOverviewPlacements(savedState.placements);
-          setTemplates(savedState.templates);
+          setTemplates(normalizedTemplates);
           setSchoolYears(savedState.schoolYears);
-          setLastSavedWorkspaceState(savedState);
+          setLastSavedWorkspaceState(normalizedSavedState);
           setDatabaseStudentNames(uniqueStudentNames(savedState.rows));
           setLockedOverviewYears(savedState.lockedOverviewYears ?? []);
           setCurrentUserRole(savedState.currentUserRole ?? "Vice Principal");
@@ -488,7 +510,7 @@ export default function StudentEvaluationApp() {
       isCalculated: draftField.isCalculated,
       calculationKey: draftField.isCalculated ? draftField.calculationKey : undefined,
       calculationExpression: undefined,
-      letterRanks: draftField.dataType === "letter" ? draftField.letterRanks.trim() : undefined,
+      letterRanks: draftField.dataType === "letter" || draftField.dataType === "text" ? draftField.letterRanks.trim() : undefined,
       roundIds: draftField.selectedRoundIds.length ? draftField.selectedRoundIds : undefined,
       sectionIds: draftField.selectedSectionIds.length ? draftField.selectedSectionIds : undefined,
       visibility: "evaluators"
@@ -1387,7 +1409,7 @@ function AssessmentBuilder({
               isCalculated: draftField.isCalculated,
               calculationKey: draftField.isCalculated ? draftField.calculationKey : undefined,
               calculationExpression: undefined,
-              letterRanks: draftField.dataType === "letter" ? draftField.letterRanks : undefined,
+              letterRanks: draftField.dataType === "letter" || draftField.dataType === "text" ? draftField.letterRanks : undefined,
               roundIds: draftField.selectedRoundIds.length ? draftField.selectedRoundIds : undefined,
               sectionIds: draftField.selectedSectionIds.length ? draftField.selectedSectionIds : undefined
             }
@@ -1653,6 +1675,27 @@ function AddFieldModal({
   );
   const selectedCalculation =
     predefinedCalculations.find((calculation) => calculation.key === draftField.calculationKey) ?? predefinedCalculations[0];
+  const showScaleEditor = (draftField.dataType === "letter" || draftField.dataType === "text") && !draftField.isCalculated;
+  const scaleRows = parseScaleRows(draftField.letterRanks);
+
+  function updateScaleRows(rows: ScaleRow[]) {
+    setDraftField((field) => ({ ...field, letterRanks: serializeScaleRows(rows) }));
+  }
+
+  function updateScaleRow(index: number, key: keyof ScaleRow, value: string) {
+    updateScaleRows(scaleRows.map((row, rowIndex) => (rowIndex === index ? { ...row, [key]: value } : row)));
+  }
+
+  function addScaleRow(afterIndex: number) {
+    const nextRows = [...scaleRows];
+    nextRows.splice(afterIndex + 1, 0, { title: "", code: "" });
+    updateScaleRows(nextRows);
+  }
+
+  function removeScaleRow(index: number) {
+    const nextRows = scaleRows.filter((_, rowIndex) => rowIndex !== index);
+    updateScaleRows(nextRows.length ? nextRows : [{ title: "", code: "" }]);
+  }
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Add assessment field">
@@ -1738,15 +1781,54 @@ function AddFieldModal({
           </div>
         ) : null}
 
-        {draftField.dataType === "letter" && !draftField.isCalculated ? (
-          <label>
-            Letter Ranks
-            <input
-              placeholder="Example: A, B, C, D"
-              value={draftField.letterRanks}
-              onChange={(event) => setDraftField((field) => ({ ...field, letterRanks: event.target.value }))}
-            />
-          </label>
+        {showScaleEditor ? (
+          <div className="scale-editor">
+            <div className="scale-editor-heading">
+              <p className="eyebrow">Scale</p>
+              <span>Define the labels and stored codes available for this field.</span>
+            </div>
+            <div className="scale-editor-labels" aria-hidden="true">
+              <span>Title</span>
+              <span>Code</span>
+              <span />
+            </div>
+            {scaleRows.map((row, index) => (
+              <div className="scale-row" key={index}>
+                <input
+                  aria-label={`Scale title ${index + 1}`}
+                  placeholder="Example: At grade level"
+                  value={row.title}
+                  onChange={(event) => updateScaleRow(index, "title", event.target.value)}
+                />
+                <input
+                  aria-label={`Scale code ${index + 1}`}
+                  placeholder="Example: A"
+                  value={row.code}
+                  onChange={(event) => updateScaleRow(index, "code", event.target.value)}
+                />
+                <div className="scale-row-actions">
+                  <button
+                    className="builder-icon-button"
+                    onClick={() => removeScaleRow(index)}
+                    type="button"
+                    aria-label={`Remove scale row ${index + 1}`}
+                    title="Remove scale row"
+                  >
+                    🗑
+                  </button>
+                  <button
+                    className="builder-icon-button"
+                    onClick={() => addScaleRow(index)}
+                    type="button"
+                    aria-label={`Add scale row after ${index + 1}`}
+                    title="Add scale row"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         ) : null}
 
         <button className="primary-action" onClick={addField} type="button">
@@ -1882,6 +1964,33 @@ function InlineEntryTable({
     [selectedGrade, selectedYear]
   );
   const rowData = useMemo(() => buildEntryRows(rows, selected, assessmentContext), [assessmentContext, rows, selected]);
+  const scaleSummaries = useMemo(() => scaleSummariesForAssessment(selected), [selected]);
+  const [scalePopupOpen, setScalePopupOpen] = useState(false);
+  const [defaultValueTarget, setDefaultValueTarget] = useState<DefaultValueTarget | null>(null);
+  const commitScaleCodeValue = useCallback(
+    (rowId: string, fieldName: string, nextValue: string | null) => {
+      const sourceRow = rows.find((row) => row.id === rowId);
+      if (!sourceRow) return;
+      const previousValue = buildEntryRows([sourceRow], selected, assessmentContext)[0]?.[fieldName] ?? null;
+      if (previousValue === nextValue) return;
+      recordAudit(
+        "Edited score",
+        "Assessment result",
+        `${sourceRow.student} / ${fieldName}`,
+        `Changed ${fieldName} from ${previousValue ?? "-"} to ${nextValue ?? "-"}.`
+      );
+      markUnsaved("Assessment table changed. Save to keep the table changes.");
+      setRows((current) =>
+        current.map((row) =>
+          row.id === rowId ? updateAssessmentRowFromTableEdit(row, selected, fieldName, nextValue, assessmentContext) : row
+        )
+      );
+    },
+    [assessmentContext, markUnsaved, recordAudit, rows, selected, setRows]
+  );
+  const openDefaultValuePopup = useCallback((target: DefaultValueTarget) => {
+    setDefaultValueTarget(target);
+  }, []);
   const columnDefs = useMemo<ColDef<EntryRow>[]>(
     () => [
       { field: "homeroom", headerName: "HR", pinned: "left", width: 90, filter: true },
@@ -1890,11 +1999,31 @@ function InlineEntryTable({
       ...selected.rounds.map((round) => ({
         headerName: round.label,
         headerStyle: roundHeaderStyle(round),
-        children: columnsForRound(selected, round)
+        children: columnsForRound(selected, round, [], [], commitScaleCodeValue, openDefaultValuePopup)
       }))
     ],
-    [notes, openNotes, selected]
+    [commitScaleCodeValue, notes, openDefaultValuePopup, openNotes, selected]
   );
+
+  function applyDefaultValue(target: DefaultValueTarget, rawValue: string) {
+    const nextValue = normalizedDefaultFieldValue(target.field, rawValue, target.scaleCodes);
+    const visibleRowIds = new Set(rows.map((row) => row.id));
+    setRows((current) =>
+      current.map((row) =>
+        visibleRowIds.has(row.id)
+          ? updateAssessmentRowFromTableEdit(row, selected, target.fieldName, nextValue, assessmentContext)
+          : row
+      )
+    );
+    recordAudit(
+      "Applied default value",
+      "Assessment result",
+      `${selected.name} / ${target.label}`,
+      `Set ${target.label} to ${nextValue ?? "-"} for ${rows.length} row${rows.length === 1 ? "" : "s"}.`
+    );
+    markUnsaved("Assessment table changed. Save to keep the table changes.");
+    setDefaultValueTarget(null);
+  }
 
   function onCellValueChanged(event: CellValueChangedEvent<EntryRow>) {
     const fieldName = event.column.getColId();
@@ -1922,6 +2051,12 @@ function InlineEntryTable({
     );
   }
 
+  function onCellFocused(event: CellFocusedEvent<EntryRow>) {
+    const colId = typeof event.column === "string" ? event.column : event.column?.getColId();
+    if (typeof event.rowIndex !== "number" || !colId) return;
+    focusScaleCodeInputInCell(event.rowIndex, colId);
+  }
+
   return (
     <section className={fullScreen ? "panel entry-panel table-card-fullscreen" : "panel entry-panel"}>
       <div className="entry-heading">
@@ -1931,6 +2066,14 @@ function InlineEntryTable({
         </div>
 
         <div className="entry-filters">
+          <button
+            className="small-action scale-action"
+            disabled={!scaleSummaries.length}
+            onClick={() => setScalePopupOpen(true)}
+            type="button"
+          >
+            Scale
+          </button>
           <label>
             Year
             <select value={selectedYear} onChange={(event) => onYearChange(event.target.value)}>
@@ -1957,6 +2100,18 @@ function InlineEntryTable({
         </div>
       </div>
 
+      {scalePopupOpen ? (
+        <ScalePopup summaries={scaleSummaries} onClose={() => setScalePopupOpen(false)} />
+      ) : null}
+
+      {defaultValueTarget ? (
+        <DefaultValuePopup
+          target={defaultValueTarget}
+          onApply={applyDefaultValue}
+          onClose={() => setDefaultValueTarget(null)}
+        />
+      ) : null}
+
       <div className="entry-save-row">
         <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} />
         <div className="entry-status entry-student-count">
@@ -1975,8 +2130,10 @@ function InlineEntryTable({
             filter: false
           }}
           getRowId={(params) => params.data.id}
+          onCellFocused={onCellFocused}
           onCellValueChanged={onCellValueChanged}
           suppressColumnVirtualisation
+          tabToNextCell={tabToNextAssessmentCell}
           stopEditingWhenCellsLoseFocus
         />
       </div>
@@ -2001,6 +2158,100 @@ function SaveBar({
         {status === "saving" ? "Saving..." : "Save"}
       </button>
       <span>{message}</span>
+    </div>
+  );
+}
+
+type ScaleSummary = {
+  fieldName: string;
+  rows: ScaleRow[];
+};
+
+function ScalePopup({ summaries, onClose }: { summaries: ScaleSummary[]; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop nested-modal" role="dialog" aria-modal="true" aria-label="Assessment scales">
+      <section className="notes-modal panel scale-popup">
+        <div className="modal-top">
+          <div>
+            <p className="eyebrow">Scale</p>
+            <h2>Assessment scales</h2>
+          </div>
+          <button className="small-action ghost" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+
+        <div className="table-scale-legend" aria-label="Assessment scale">
+          {summaries.map((summary) => (
+            <div className="table-scale-group" key={summary.fieldName}>
+              <span className="table-scale-field">{summary.fieldName}</span>
+              <div className="table-scale-chips">
+                {summary.rows.map((row, index) => (
+                  <span className="table-scale-chip" key={`${row.title}-${row.code}-${index}`}>
+                    {row.title || "Untitled"}
+                    {row.code ? <strong>{row.code}</strong> : null}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DefaultValuePopup({
+  target,
+  onApply,
+  onClose
+}: {
+  target: DefaultValueTarget;
+  onApply: (target: DefaultValueTarget, value: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(target.scaleCodes[0] ?? "");
+  const inputType = target.field.dataType === "integer" || target.field.dataType === "percentage" ? "number" : target.field.dataType === "date" ? "date" : "text";
+
+  return (
+    <div className="modal-backdrop nested-modal" role="dialog" aria-modal="true" aria-label="Default column value">
+      <section className="notes-modal panel default-value-popup">
+        <div className="modal-top">
+          <div>
+            <p className="eyebrow">Default value</p>
+            <h2>{target.field.name}</h2>
+          </div>
+          <button className="small-action ghost" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+
+        <p className="default-value-help">Apply one value to every row in this column for the current table.</p>
+
+        <label>
+          Value
+          {target.scaleCodes.length ? (
+            <select value={value} onChange={(event) => setValue(event.target.value)}>
+              {target.scaleCodes.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input autoFocus type={inputType} value={value} onChange={(event) => setValue(event.target.value)} />
+          )}
+        </label>
+
+        <div className="modal-actions">
+          <button className="small-action ghost" onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="primary-action" onClick={() => onApply(target, value)} type="button">
+            Apply to all rows
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -2258,8 +2509,11 @@ function Dashboard({
   const [assessmentId, setAssessmentId] = useState(templates[0]?.id ?? "all");
   const selectedAssessment = templates.find((template) => template.id === assessmentId) ?? templates[0];
   const [fieldId, setFieldId] = useState(selectedAssessment?.fields[0]?.id ?? "");
+  const [sectionId, setSectionId] = useState("all");
+  const [roundId, setRoundId] = useState("all");
   const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
   const [yearPickerOpen, setYearPickerOpen] = useState(false);
+  const [progressionFullScreen, setProgressionFullScreen] = useState(false);
   const allYearsSelected = selectedYears.length === schoolYears.length;
   const yearPickerLabel = allYearsSelected
     ? "All Years"
@@ -2319,20 +2573,67 @@ function Dashboard({
       }),
     [dashboardPlacements, rowsById, studentKey]
   );
+  const selectedField = useMemo(
+    () => selectedAssessment?.fields.find((field) => field.id === fieldId) ?? selectedAssessment?.fields[0],
+    [fieldId, selectedAssessment]
+  );
+  const selectedScaleCodes = useMemo(() => (selectedField ? scaleCodesForField(selectedField) : []), [selectedField]);
+  const usesScaleYAxis = selectedScaleCodes.length > 0 && (selectedField?.dataType === "letter" || selectedField?.dataType === "text");
+  const availableSections = useMemo(() => {
+    if (!selectedAssessment || !selectedField) return [];
+    const sections = new Map<string, AssessmentSectionTemplate>();
+    selectedAssessment.rounds.forEach((round) => {
+      dashboardSectionsForField(selectedAssessment, round, selectedField).forEach((section) => {
+        sections.set(section.id, section);
+      });
+    });
+    return Array.from(sections.values());
+  }, [selectedAssessment, selectedField]);
+
+  useEffect(() => {
+    if (sectionId !== "all" && !availableSections.some((section) => section.id === sectionId)) {
+      setSectionId("all");
+    }
+  }, [availableSections, sectionId]);
+
+  useEffect(() => {
+    if (roundId !== "all" && !selectedAssessment?.rounds.some((round) => round.id === roundId)) {
+      setRoundId("all");
+    }
+  }, [roundId, selectedAssessment]);
 
   const chartData = useMemo(() => {
     if (!selectedAssessment) return [];
-    const selectedField = selectedAssessment.fields.find((field) => field.id === fieldId) ?? selectedAssessment.fields[0];
     return selectedYears
       .slice()
       .sort(compareSchoolYears)
-      .flatMap((year) =>
-        selectedAssessment.rounds.map((round, roundIndex) => {
-          const showYearLabel = roundIndex === Math.floor(selectedAssessment.rounds.length / 2);
+      .flatMap((year) => {
+        const chartPoints = selectedAssessment.rounds.reduce<
+          Array<{ round: AssessmentRoundTemplate; section?: AssessmentSectionTemplate; sectionIndex: number; sectionCount: number }>
+        >((points, round) => {
+          if (roundId !== "all" && round.id !== roundId) return points;
+          const sections = dashboardSectionsForField(selectedAssessment, round, selectedField);
+          if (sections.length) {
+            const filteredSections = sectionId === "all" ? sections : sections.filter((section) => section.id === sectionId);
+            filteredSections.forEach((section, sectionIndex) =>
+              points.push({ round, section, sectionIndex, sectionCount: filteredSections.length })
+            );
+          } else {
+            if (sectionId === "all") {
+              points.push({ round, sectionIndex: 0, sectionCount: 0 });
+            }
+          }
+          return points;
+        }, []);
+
+        return chartPoints.map(({ round, section, sectionIndex, sectionCount }, pointIndex) => {
+          const showYearLabel = pointIndex === Math.floor(chartPoints.length / 2);
+          const showWindowLabel = !section || sectionIndex === Math.floor(sectionCount / 2);
           return {
-            axisKey: `${windowIndicatorForRound(round)}|${showYearLabel ? year : ""}|${year}-${round.id}`,
+            axisKey: `${section?.name ?? ""}|${showWindowLabel ? windowIndicatorForRound(round) : ""}|${showYearLabel ? year : ""}|${sectionIndex % 2}|${year}-${round.id}-${section?.id ?? "window"}`,
             year,
             window: round.label,
+            section: section?.name ?? "",
             color: round.color ?? "#101820",
             averageScore: averageDashboardFieldValue(
               filteredPlacements,
@@ -2340,27 +2641,13 @@ function Dashboard({
               selectedAssessment,
               round,
               selectedField,
-              roundIndex,
-              year
+              year,
+              section
             )
           };
-        })
-      );
-  }, [fieldId, filteredPlacements, rowsById, selectedAssessment, selectedYears]);
-
-  const homeroomData = useMemo(() => {
-    return Array.from(new Set(filteredPlacements.map((placement) => placement.homeroom))).map((homeroom) => {
-      const homeroomRows = filteredPlacements
-        .filter((placement) => placement.homeroom === homeroom)
-        .map((placement) => rowsById.get(placement.studentId))
-        .filter((row): row is OrfResultRow => Boolean(row));
-      return {
-        homeroom,
-        watch: homeroomRows.filter((row) => typeof row.septMedian === "number" && row.septMedian < 50).length,
-        total: homeroomRows.length
-      };
-    });
-  }, [filteredPlacements, rowsById]);
+        });
+      });
+  }, [filteredPlacements, rowsById, roundId, sectionId, selectedAssessment, selectedField, selectedYears]);
 
   function toggleDashboardYear(year: string) {
     setSelectedYears((current) =>
@@ -2417,6 +2704,30 @@ function Dashboard({
           </select>
         </label>
 
+        <label>
+          Section
+          <select value={sectionId} onChange={(event) => setSectionId(event.target.value)}>
+            <option value="all">All sections</option>
+            {availableSections.map((section) => (
+              <option key={section.id} value={section.id}>
+                {section.name}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label>
+          Window
+          <select value={roundId} onChange={(event) => setRoundId(event.target.value)}>
+            <option value="all">All windows</option>
+            {(selectedAssessment?.rounds ?? []).map((round) => (
+              <option key={round.id} value={round.id}>
+                {round.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <div className="dashboard-year-picker">
           <span>Year</span>
           <button className="picker-field-button" onClick={() => setYearPickerOpen((open) => !open)} type="button">
@@ -2445,39 +2756,35 @@ function Dashboard({
         </div>
       </div>
 
-      <div className="panel chart-panel">
-        <div className="panel-heading">
-          <p className="eyebrow">Progression</p>
-          <h2>Average field score by year and window</h2>
+      <div className={progressionFullScreen ? "panel chart-panel progression-chart-panel chart-panel-fullscreen" : "panel chart-panel progression-chart-panel"}>
+        <div className="panel-heading chart-panel-heading">
+          <div>
+            <p className="eyebrow">Progression</p>
+            <h2>Average field score by year and window</h2>
+          </div>
+          <button className="small-action ghost" onClick={() => setProgressionFullScreen((current) => !current)} type="button">
+            {progressionFullScreen ? "Exit full screen" : "Full screen"}
+          </button>
         </div>
         <div className="chart-frame">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="axisKey" height={66} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
-              <YAxis allowDecimals={false} />
-              <Tooltip />
+              <XAxis dataKey="axisKey" height={98} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
+              {usesScaleYAxis ? (
+                <YAxis
+                  allowDecimals={false}
+                  domain={[1, selectedScaleCodes.length]}
+                  ticks={selectedScaleCodes.map((_, index) => index + 1)}
+                  tickFormatter={(value) => selectedScaleCodes[Number(value) - 1] ?? ""}
+                  width={48}
+                />
+              ) : (
+                <YAxis allowDecimals={false} />
+              )}
+              <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
               <Line connectNulls type="monotone" dataKey="averageScore" stroke="#101820" strokeWidth={3} dot={<DashboardDot />} />
             </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
-
-      <div className="panel chart-panel">
-        <div className="panel-heading">
-          <p className="eyebrow">Watch List</p>
-          <h2>Below-50 count by homeroom</h2>
-        </div>
-        <div className="chart-frame">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={homeroomData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="homeroom" />
-              <YAxis allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="watch" fill="#ff6f61" radius={[6, 6, 0, 0]} />
-              <Bar dataKey="total" fill="#d4a72c" radius={[6, 6, 0, 0]} />
-            </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -2487,14 +2794,21 @@ function Dashboard({
 
 function DashboardAxisTick(props: { x?: number; y?: number; payload?: { value?: string } }) {
   if (typeof props.x !== "number" || typeof props.y !== "number") return null;
-  const [windowLabel = "", yearLabel = ""] = String(props.payload?.value ?? "").split("|");
+  const [sectionLabel = "", windowLabel = "", yearLabel = "", sectionLine = "0"] = String(props.payload?.value ?? "").split("|");
+  const hasSection = Boolean(sectionLabel);
+  const staggerSection = sectionLine === "1";
 
   return (
     <g transform={`translate(${props.x},${props.y})`}>
-      <text x={0} y={8} textAnchor="middle" fill="#101820" fontSize={12} fontWeight={800}>
+      {hasSection ? (
+        <text x={0} y={staggerSection ? 18 : 4} textAnchor="middle" fill="#101820" fontSize={10} fontWeight={900}>
+          {sectionLabel}
+        </text>
+      ) : null}
+      <text x={0} y={hasSection ? 38 : 12} textAnchor="middle" fill="#101820" fontSize={12} fontWeight={800}>
         {windowLabel}
       </text>
-      <text x={0} y={26} textAnchor="middle" fill="#66707c" fontSize={11} fontWeight={700}>
+      <text x={0} y={hasSection ? 56 : 30} textAnchor="middle" fill="#66707c" fontSize={11} fontWeight={700}>
         {yearLabel}
       </text>
     </g>
@@ -2515,18 +2829,31 @@ function DashboardDot(props: { cx?: number; cy?: number; payload?: { color?: str
   );
 }
 
+function dashboardSectionsForField(
+  template: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  field: AssessmentFieldTemplate | undefined
+) {
+  if (!field?.sectionIds?.length) return [];
+  const sectionsForRound = sectionsForAssessmentRound(template, round);
+  const matchingSections = sectionsForRound.filter((section) => field.sectionIds?.includes(section.id));
+  if (matchingSections.length || template.id !== "orf") return matchingSections;
+  return sectionsForRound;
+}
+
 function averageDashboardFieldValue(
   placements: StudentPlacement[],
   rowsById: Map<string, OrfResultRow>,
   template: AssessmentTemplate,
   round: AssessmentRoundTemplate,
   field: AssessmentFieldTemplate | undefined,
-  roundIndex: number,
-  schoolYear: string
+  schoolYear: string,
+  section?: AssessmentSectionTemplate
 ) {
   const yearPlacements = placements.filter((placement) => placement.schoolYear === schoolYear);
   if (!field || !yearPlacements.length) return null;
-  const sectionsForRound = sectionsForAssessmentRound(template, round).filter((section) => field.sectionIds?.includes(section.id));
+  const sectionsForRound = section ? [section] : dashboardSectionsForField(template, round, field);
+  const scaleCodes = scaleCodesForField(field);
   const values = yearPlacements
     .flatMap((placement) => {
       const row = rowsById.get(placement.studentId);
@@ -2537,10 +2864,29 @@ function averageDashboardFieldValue(
       }
       return [entryValue(row, template, round, field, undefined, context)];
     })
+    .map((value) => dashboardChartValue(value, field, scaleCodes))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
 
   if (!values.length) return null;
   return Math.round((values.reduce((total, value) => total + value, 0) / values.length) * 10) / 10;
+}
+
+function dashboardChartValue(value: unknown, field: AssessmentFieldTemplate, scaleCodes: string[]) {
+  if ((field.dataType === "letter" || field.dataType === "text") && scaleCodes.length) {
+    const codeIndex = scaleCodes.findIndex((code) => code.toLowerCase() === String(value ?? "").trim().toLowerCase());
+    return codeIndex >= 0 ? codeIndex + 1 : null;
+  }
+
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function formatDashboardTooltipValue(value: unknown, scaleCodes: string[]) {
+  if (!scaleCodes.length) return value as number | string;
+  const numericValue = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numericValue)) return "";
+  const exactCode = scaleCodes[numericValue - 1];
+  if (exactCode) return exactCode;
+  return numericValue.toFixed(1);
 }
 
 function compareSchoolYears(left: string, right: string) {
@@ -2916,21 +3262,17 @@ function StudentReport({
     );
   }
 
-  function downloadCsvReport() {
+  function downloadExcelReport() {
     if (!selectedStudent || !selectedTemplate || !selectedYears.length) return;
-    const csv = studentReportCsv(reportRows);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${safeFileName(`${selectedStudent.student}-${selectedTemplate.name}-assessment-report`)}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
+    const workbook = studentReportWorkbook(reportRows);
+    XLSX.writeFile(workbook, `${safeFileName(`${selectedStudent.student}-${selectedTemplate.name}-assessment-report`)}.xlsx`, {
+      compression: true
+    });
     recordAudit(
       "Downloaded report",
       "Student report",
       selectedStudent.student,
-      `Generated a CSV report for ${selectedTemplate.name} across ${selectedYears.join(", ")}.`
+      `Generated an Excel report for ${selectedTemplate.name} across ${selectedYears.join(", ")}.`
     );
   }
 
@@ -2980,8 +3322,8 @@ function StudentReport({
           ))}
         </div>
 
-        <button className="primary-action" disabled={!selectedYears.length} onClick={downloadCsvReport} type="button">
-          Download CSV report
+        <button className="primary-action" disabled={!selectedYears.length} onClick={downloadExcelReport} type="button">
+          Download Excel report
         </button>
       </div>
 
@@ -3001,6 +3343,7 @@ type StudentReportRow = {
   student: string;
   assessment: string;
   window: string;
+  windowColor: string;
   section: string;
   field: string;
   value: string;
@@ -3047,6 +3390,7 @@ function studentReportRows(
                   student: student.student,
                   assessment: template.name,
                   window: round.label,
+                  windowColor: round.color ?? "#fffaf0",
                   section: section.name,
                   field: field.name,
                   value: formatReportValue(entryValue(student, template, round, field, section, context))
@@ -3064,6 +3408,7 @@ function studentReportRows(
                 student: student.student,
                 assessment: template.name,
                 window: round.label,
+                windowColor: round.color ?? "#fffaf0",
                 section: "",
                 field: field.name,
                 value: formatReportValue(entryValue(student, template, round, field, undefined, context))
@@ -3081,6 +3426,7 @@ function studentReportRows(
       student: studentName,
       assessment: template.name,
       window: "",
+      windowColor: "#fffaf0",
       section: "",
       field: "No data",
       value: ""
@@ -3123,35 +3469,202 @@ function studentReportText(studentName: string, template: AssessmentTemplate, se
   return lines.join("\n").trimEnd();
 }
 
-function studentReportCsv(rows: StudentReportRow[]) {
-  const table = [
-    ["Year", "Grade", "Homeroom", "Student", "Assessment", "Window", "Section", "Field", "Value"],
-    ...rows.map((row) => [
-      row.year,
-      row.grade,
-      row.homeroom,
-      row.student,
-      row.assessment,
-      row.window,
-      row.section,
-      row.field,
-      row.value
-    ])
+function studentReportWorkbook(rows: StudentReportRow[]) {
+  const columns = uniqueReportColumns(rows);
+  const groupKeys = uniqueIds(rows.map((row) => reportPlacementKey(row)));
+  const rowsByGroup = new Map<string, StudentReportRow[]>();
+  rows.forEach((row) => {
+    const key = reportPlacementKey(row);
+    rowsByGroup.set(key, [...(rowsByGroup.get(key) ?? []), row]);
+  });
+
+  const sheetRows = [
+    ["Assessment Year", "", "", ...columns.map((column) => column.year)],
+    ["Assessment Window", "", "", ...columns.map((column) => column.window)],
+    ["Assessment Section", "", "", ...columns.map((column) => column.section)],
+    ["Student", "Grade", "Homeroom", ...columns.map((column) => column.field)],
+    ...groupKeys.map((key) => {
+      const groupRows = rowsByGroup.get(key) ?? [];
+      const first = groupRows[0];
+      return [
+        first?.student ?? "",
+        first?.grade ?? "",
+        first?.homeroom ?? "",
+        ...columns.map((column) => {
+          const match = groupRows.find((row) => reportColumnKey(row) === column.key);
+          return match?.value ?? "";
+        })
+      ];
+    })
   ];
 
-  return `\uFEFFsep=,\r\n${table.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+  const worksheet = XLSX.utils.aoa_to_sheet(sheetRows);
+  worksheet["!merges"] = [
+    ...mergedHeaderRanges(sheetRows[0], 3, 0),
+    ...mergedHeaderRanges(sheetRows[1], 3, 1),
+    ...mergedHeaderRanges(sheetRows[2], 3, 2)
+  ];
+  worksheet["!cols"] = [
+    { wch: 24 },
+    { wch: 10 },
+    { wch: 14 },
+    ...columns.map((column) => ({ wch: Math.max(12, Math.min(24, column.field.length + 2)) }))
+  ];
+  styleReportWorksheet(worksheet, sheetRows.length, sheetRows[0].length, columns);
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Student Report");
+  return workbook;
+}
+
+function mergedHeaderRanges(row: string[], startColumn: number, rowIndex: number): XLSX.Range[] {
+  const merges: XLSX.Range[] = [];
+  let column = startColumn;
+
+  while (column < row.length) {
+    const value = row[column];
+    let endColumn = column;
+    while (endColumn + 1 < row.length && row[endColumn + 1] === value) {
+      endColumn += 1;
+    }
+    if (value && endColumn > column) {
+      merges.push({ s: { r: rowIndex, c: column }, e: { r: rowIndex, c: endColumn } });
+    }
+    column = endColumn + 1;
+  }
+
+  return merges;
+}
+
+function styleReportWorksheet(
+  worksheet: XLSX.WorkSheet,
+  rowCount: number,
+  columnCount: number,
+  columns: Array<{ windowColor: string }>
+) {
+  for (let row = 0; row < rowCount; row += 1) {
+    for (let column = 0; column < columnCount; column += 1) {
+      const cellAddress = XLSX.utils.encode_cell({ r: row, c: column });
+      const cell = worksheet[cellAddress];
+      if (!cell) continue;
+      const windowColor = column >= 3 ? columns[column - 3]?.windowColor : undefined;
+      const fillColor = windowColor ? windowColor.replace("#", "").toUpperCase() : column < 3 && row < 4 ? "EFE7D5" : undefined;
+      cell.s = {
+        ...(cell.s ?? {}),
+        alignment: { horizontal: row < 4 ? "center" : "left", vertical: "center", wrapText: true },
+        font: row < 4 ? { bold: true } : undefined,
+        fill: fillColor ? { patternType: "solid", fgColor: { rgb: fillColor } } : undefined,
+        border: {
+          top: { style: "thin", color: { rgb: "B8B0A1" } },
+          right: { style: "thin", color: { rgb: "B8B0A1" } },
+          bottom: { style: "thin", color: { rgb: "B8B0A1" } },
+          left: { style: "thin", color: { rgb: "B8B0A1" } }
+        }
+      };
+    }
+  }
+}
+
+function uniqueReportColumns(rows: StudentReportRow[]) {
+  const seen = new Set<string>();
+  return rows
+    .map((row) => ({
+      key: reportColumnKey(row),
+      year: row.year,
+      window: row.window,
+      windowColor: row.windowColor,
+      section: row.section,
+      field: row.field
+    }))
+    .filter((column) => {
+      if (seen.has(column.key)) return false;
+      seen.add(column.key);
+      return true;
+    });
+}
+
+function reportColumnKey(row: Pick<StudentReportRow, "year" | "window" | "section" | "field">) {
+  return [row.year, row.window, row.section, row.field].join("|");
+}
+
+function reportPlacementKey(row: Pick<StudentReportRow, "year" | "grade" | "homeroom" | "student">) {
+  return [row.year, row.grade, row.homeroom, row.student].join("|");
 }
 
 function formatReportValue(value: unknown) {
   return value === null || typeof value === "undefined" ? "" : String(value);
 }
 
-function csvCell(value: string) {
-  return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, "\"\"")}"` : value;
-}
-
 function safeFileName(value: string) {
   return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/\s+/g, " ").trim() || "student-assessment-report";
+}
+
+type ScaleRow = {
+  title: string;
+  code: string;
+};
+
+function scaleSummariesForAssessment(assessment: AssessmentTemplate): ScaleSummary[] {
+  return assessment.fields
+    .filter((field) => !field.isCalculated && (field.dataType === "letter" || field.dataType === "text") && Boolean(field.letterRanks?.trim()))
+    .map((field) => ({
+      fieldName: field.name,
+      rows: parseScaleRows(field.letterRanks ?? "").filter((row) => row.title || row.code)
+    }))
+    .filter((summary) => summary.rows.length > 0);
+}
+
+function scaleCodesForField(field: AssessmentFieldTemplate) {
+  if (field.dataType !== "letter" && field.dataType !== "text") return [];
+  return parseScaleRows(field.letterRanks ?? "")
+    .map((row) => row.code.trim())
+    .filter(Boolean);
+}
+
+function validScaleCodeValue(value: unknown, codes: string[]) {
+  const typedValue = String(value ?? "").trim();
+  if (!typedValue) return null;
+  return codes.find((code) => code.toLowerCase() === typedValue.toLowerCase()) ?? null;
+}
+
+function printableEditorCharacter(key?: string | null) {
+  if (!key || key.length !== 1) return null;
+  return key;
+}
+
+function parseScaleRows(value: string): ScaleRow[] {
+  if (!value.trim()) return [{ title: "", code: "" }];
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed)) {
+      const rows = parsed
+        .map((row) => {
+          if (!row || typeof row !== "object") return null;
+          const candidate = row as Partial<ScaleRow>;
+          return {
+            title: String(candidate.title ?? ""),
+            code: String(candidate.code ?? "")
+          };
+        })
+        .filter((row): row is ScaleRow => Boolean(row));
+      if (rows.length) return rows;
+    }
+  } catch {
+    // Older fields used a comma-separated list. Fall through and upgrade it into rows.
+  }
+
+  const rows = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => ({ title: item, code: item }));
+  return rows.length ? rows : [{ title: "", code: "" }];
+}
+
+function serializeScaleRows(rows: ScaleRow[]) {
+  const cleanRows = rows.map((row) => ({ title: row.title.trim(), code: row.code.trim() }));
+  return JSON.stringify(cleanRows);
 }
 
 function StudentNotesModal({
@@ -4050,31 +4563,588 @@ function studentActionColumn(
   };
 }
 
+type AssessmentGridApiLike = {
+  ensureColumnVisible?: (colKey: string) => void;
+  getAllDisplayedColumns?: () => Column[];
+  setFocusedCell?: (rowIndex: number, colKey: string) => void;
+  startEditingCell?: (params: { rowIndex: number; colKey: string }) => void;
+};
+
+function classTextIncludes(value: unknown, className: string): boolean {
+  if (typeof value === "string") return value.includes(className);
+  if (Array.isArray(value)) return value.some((item) => classTextIncludes(item, className));
+  return false;
+}
+
+function isAssessmentDataColumn(column: { getColDef?: () => ColDef<EntryRow> }) {
+  return classTextIncludes(column.getColDef?.().cellClass, "assessment-data-cell");
+}
+
+function findAssessmentGridCell(rowIndex: number, colId: string) {
+  const matchingCells = Array.from(document.querySelectorAll<HTMLElement>(".ag-center-cols-container .ag-cell"));
+  const exactRowCell = matchingCells.find(
+    (cell) => cell.getAttribute("row-index") === String(rowIndex) && cell.getAttribute("col-id") === colId
+  );
+  if (exactRowCell) return exactRowCell;
+
+  const focusedCell = matchingCells.find(
+    (cell) => cell.classList.contains("ag-cell-focus") && cell.getAttribute("col-id") === colId
+  );
+  if (focusedCell) return focusedCell;
+
+  return matchingCells.find((cell) => cell.getAttribute("col-id") === colId);
+}
+
+function activateAssessmentGridCell(rowIndex: number, colId: string, api?: AssessmentGridApiLike) {
+  api?.ensureColumnVisible?.(colId);
+
+  const activate = (attempt = 0) => {
+    api?.setFocusedCell?.(rowIndex, colId);
+    const nextCell = findAssessmentGridCell(rowIndex, colId);
+    const nextScaleButton = nextCell?.querySelector<HTMLButtonElement>(".scale-code-cell-display");
+    const nextScaleInput = nextCell?.querySelector<HTMLInputElement>(".scale-code-inline-input");
+    const nextScaleShell = nextCell?.querySelector<HTMLElement>(".scale-code-cell-shell");
+    const nextScaleCellId = nextScaleShell?.dataset.scaleCellId;
+
+    if (nextScaleInput) {
+      if (nextScaleCellId) {
+        (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus = nextScaleCellId;
+        window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: nextScaleCellId } }));
+      }
+      nextScaleInput.focus();
+      nextScaleInput.select();
+      if (attempt < 10 && document.activeElement !== nextScaleInput) window.setTimeout(() => activate(attempt + 1), 80);
+      return;
+    }
+
+    if (nextScaleButton) {
+      if (nextScaleCellId) {
+        (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus = nextScaleCellId;
+        window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: nextScaleCellId } }));
+      }
+      nextScaleButton.click();
+      requestAnimationFrame(() => {
+        if (nextScaleCellId) {
+          window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: nextScaleCellId } }));
+        }
+        nextCell?.querySelector<HTMLInputElement>(".scale-code-inline-input")?.focus();
+        nextCell?.querySelector<HTMLInputElement>(".scale-code-inline-input")?.select();
+      });
+      if (attempt < 10) window.setTimeout(() => activate(attempt + 1), 80);
+      return;
+    }
+
+    if (nextCell?.classList.contains("editable-score-cell")) {
+      nextCell.focus();
+      nextCell.click();
+      nextCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+      api?.startEditingCell?.({ rowIndex, colKey: colId });
+      if (attempt < 10) window.setTimeout(() => activate(attempt + 1), 80);
+      return;
+    }
+
+    nextCell?.focus();
+  };
+
+  requestAnimationFrame(() => activate());
+}
+
+function focusScaleCodeInputInCell(rowIndex: number, colId: string) {
+  const focusInput = (attempt = 0) => {
+    const cell = findAssessmentGridCell(rowIndex, colId);
+    const shell = cell?.querySelector<HTMLElement>(".scale-code-cell-shell");
+    const input = cell?.querySelector<HTMLInputElement>(".scale-code-inline-input");
+    const scaleCellId = shell?.dataset.scaleCellId;
+
+    if (input) {
+      if (scaleCellId) {
+        (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus = scaleCellId;
+        window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: scaleCellId } }));
+      }
+      input.focus();
+      input.select();
+      if (attempt < 10 && document.activeElement !== input) window.setTimeout(() => focusInput(attempt + 1), 60);
+      return;
+    }
+
+    if (attempt < 10) window.setTimeout(() => focusInput(attempt + 1), 60);
+  };
+
+  requestAnimationFrame(() => focusInput());
+}
+
+function nextAssessmentColumn(
+  api: AssessmentGridApiLike | undefined,
+  currentColId: string | undefined,
+  direction: 1 | -1
+) {
+  const columns = api?.getAllDisplayedColumns?.() ?? [];
+  const currentIndex = columns.findIndex((column) => column.getColId?.() === currentColId);
+  if (currentIndex < 0) return undefined;
+
+  const candidates = direction === 1 ? columns.slice(currentIndex + 1) : columns.slice(0, currentIndex).reverse();
+  return candidates.find(isAssessmentDataColumn);
+}
+
+function tabToNextAssessmentCell(params: TabToNextCellParams<EntryRow>): CellPosition | boolean {
+  const previous = params.previousCellPosition;
+  const rowIndex = previous?.rowIndex;
+  const currentColId = previous?.column?.getColId?.();
+  const direction = params.backwards ? -1 : 1;
+  const nextColumn = nextAssessmentColumn(params.api, currentColId, direction);
+  const nextColId = nextColumn?.getColId?.();
+
+  if (typeof rowIndex !== "number" || !nextColumn || !nextColId) return false;
+  activateAssessmentGridCell(rowIndex, nextColId, params.api);
+  return {
+    rowIndex,
+    rowPinned: previous?.rowPinned ?? null,
+    column: nextColumn
+  };
+}
+
+type ScaleCodeCellEditorParams = {
+  data?: EntryRow;
+  value?: unknown;
+  initialValue?: unknown;
+  onValueChange?: (value: string | null) => void;
+  codes?: string[];
+  fieldName?: string;
+  rowId?: string;
+  commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void;
+  eventKey?: string | null;
+  charPress?: string | null;
+  stopEditing?: (suppressNavigateAfterEdit?: boolean) => void;
+  column?: {
+    getColId?: () => string;
+  };
+  node?: {
+    rowIndex?: number | null;
+  };
+  api?: AssessmentGridApiLike & {
+    tabToNextCell?: () => boolean;
+    tabToPreviousCell?: () => boolean;
+  };
+};
+
+const ScaleCodeCellRenderer = forwardRef(function ScaleCodeCellRenderer(
+  {
+    data,
+    value,
+    initialValue,
+    onValueChange,
+    codes = [],
+    fieldName,
+    rowId,
+    commitScaleCodeValue,
+    eventKey,
+    charPress,
+    stopEditing,
+    column,
+    node,
+    api
+  }: ScaleCodeCellEditorParams,
+  ref
+) {
+  const shellRef = useRef<HTMLSpanElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const committingRef = useRef(false);
+  const openingCharacter = printableEditorCharacter(charPress ?? eventKey);
+  const startedWithKeyPress = Boolean(openingCharacter);
+  const displayValue = String(value ?? initialValue ?? "");
+  const effectiveRowId = rowId ?? data?.id;
+  const scaleCellId = effectiveRowId && fieldName ? `${effectiveRowId}:${fieldName}` : "";
+  const initialDraft = openingCharacter ?? displayValue;
+  const committedValueRef = useRef(initialDraft);
+  const [draft, setDraft] = useState(initialDraft);
+  const [focused, setFocused] = useState(false);
+  const [editing, setEditing] = useState(startedWithKeyPress);
+  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0, width: 160 });
+  const normalizedCodes = useMemo(() => codes.map((code) => code.trim()).filter(Boolean), [codes]);
+  const suggestions = useMemo(() => {
+    const normalizedDraft = draft.trim().toLowerCase();
+    if (!normalizedDraft) return normalizedCodes.slice(0, 8);
+    return normalizedCodes.filter((code) => code.toLowerCase().includes(normalizedDraft)).slice(0, 8);
+  }, [draft, normalizedCodes]);
+
+  useEffect(() => {
+    if (!focused) setDraft(displayValue);
+  }, [displayValue, focused]);
+
+  useEffect(() => {
+    if (!scaleCellId || typeof window === "undefined") return;
+    const pendingFocusCellId = (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus;
+    if (pendingFocusCellId !== scaleCellId) return;
+    startEditing();
+    window.setTimeout(() => {
+      const focusWindow = window as Window & { __pendingScaleCodeCellFocus?: string };
+      if (focusWindow.__pendingScaleCodeCellFocus === scaleCellId) delete focusWindow.__pendingScaleCodeCellFocus;
+    }, 600);
+  }, [scaleCellId, displayValue]);
+
+  useEffect(() => {
+    if (!scaleCellId || typeof window === "undefined") return;
+
+    function handleScaleCodeCellFocus(event: Event) {
+      const cellId = (event as CustomEvent<{ cellId?: string }>).detail?.cellId;
+      if (cellId === scaleCellId) startEditing();
+    }
+
+    window.addEventListener("scale-code-cell-focus", handleScaleCodeCellFocus);
+    return () => window.removeEventListener("scale-code-cell-focus", handleScaleCodeCellFocus);
+  }, [scaleCellId, displayValue]);
+
+  useImperativeHandle(ref, () => ({
+    getValue() {
+      const exactCode = normalizedCodes.find((code) => code.toLowerCase() === committedValueRef.current.trim().toLowerCase());
+      return exactCode ?? null;
+    }
+  }));
+
+  useEffect(() => {
+    if (!startedWithKeyPress) return;
+    requestAnimationFrame(() => {
+      setEditing(true);
+      inputRef.current?.focus();
+    });
+  }, [startedWithKeyPress]);
+
+  useEffect(() => {
+    if (!focused) return;
+
+    updateMenuPosition();
+    window.addEventListener("resize", updateMenuPosition);
+    window.addEventListener("scroll", updateMenuPosition, true);
+    return () => {
+      window.removeEventListener("resize", updateMenuPosition);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+    };
+  }, [draft, focused]);
+
+  function updateMenuPosition() {
+    const bounds = inputRef.current?.getBoundingClientRect();
+    if (!bounds) return;
+    setMenuPosition({
+      top: bounds.bottom + 4,
+      left: bounds.left,
+      width: Math.max(160, bounds.width)
+    });
+  }
+
+  function chooseCode(code: string) {
+    commitEditor(code);
+    setFocused(false);
+    setEditing(false);
+  }
+
+  function focusAdjacentEditableGridCell(fromElement: HTMLElement, direction: 1 | -1) {
+    const currentGridCell = fromElement.closest<HTMLElement>(".ag-cell");
+    const currentRowIndex = currentGridCell?.getAttribute("row-index");
+    let targetRowIndex: number | undefined;
+    let targetColId: string | undefined;
+
+    if (currentGridCell && currentRowIndex) {
+      const rowAssessmentCells = Array.from(document.querySelectorAll<HTMLElement>(".ag-center-cols-container .ag-cell.assessment-data-cell"))
+        .filter((cell) => cell.getAttribute("row-index") === currentRowIndex)
+        .sort((first, second) => Number(first.getAttribute("aria-colindex") ?? 0) - Number(second.getAttribute("aria-colindex") ?? 0));
+      const currentIndex = rowAssessmentCells.indexOf(currentGridCell);
+      const nextCell = rowAssessmentCells[currentIndex + direction];
+      const rowNextColId = nextCell?.getAttribute("col-id");
+      const rowNextIndex = Number(currentRowIndex);
+
+      if (rowNextColId && Number.isFinite(rowNextIndex)) {
+        targetRowIndex = rowNextIndex;
+        targetColId = rowNextColId;
+      }
+    }
+
+    if (typeof targetRowIndex !== "number" || !targetColId) {
+      const currentColId = column?.getColId?.() ?? fieldName;
+      const gridRowIndex = node?.rowIndex;
+      const nextColumn = nextAssessmentColumn(api, currentColId, direction);
+      const gridNextColId = nextColumn?.getColId?.();
+
+      if (typeof gridRowIndex === "number" && gridNextColId) {
+        targetRowIndex = gridRowIndex;
+        targetColId = gridNextColId;
+      }
+    }
+
+    setEditing(false);
+    requestAnimationFrame(() => {
+      if (typeof targetRowIndex === "number" && targetColId) {
+        activateAssessmentGridCell(targetRowIndex, targetColId, api);
+        return;
+      }
+
+      if (!currentGridCell) return;
+
+      const assessmentCells = Array.from(document.querySelectorAll<HTMLElement>(".ag-center-cols-container .ag-cell.assessment-data-cell"));
+      const currentIndex = assessmentCells.indexOf(currentGridCell);
+      const nextCell = assessmentCells[currentIndex + direction];
+      const fallbackNextColId = nextCell?.getAttribute("col-id");
+      const fallbackRowIndex = Number(nextCell?.getAttribute("row-index"));
+      if (fallbackNextColId && Number.isFinite(fallbackRowIndex)) activateAssessmentGridCell(fallbackRowIndex, fallbackNextColId, api);
+    });
+  }
+
+  function commitEditor(nextValue: string | null, navigate?: "next" | "previous") {
+    committingRef.current = true;
+    committedValueRef.current = nextValue ?? "";
+    onValueChange?.(nextValue);
+    if (effectiveRowId && fieldName) commitScaleCodeValue?.(effectiveRowId, fieldName, nextValue);
+    setDraft(nextValue ?? "");
+
+    requestAnimationFrame(() => {
+      stopEditing?.(false);
+      requestAnimationFrame(() => {
+        if (navigate === "previous") {
+          api?.tabToPreviousCell?.();
+          return;
+        }
+        if (navigate === "next") api?.tabToNextCell?.();
+      });
+    });
+  }
+
+  function startEditing(nextDraft = displayValue) {
+    committingRef.current = false;
+    setDraft(nextDraft);
+    setEditing(true);
+    const focusInput = (attempt = 0) => {
+      const input = inputRef.current;
+      if (!input) {
+        if (attempt < 8) window.setTimeout(() => focusInput(attempt + 1), 50);
+        return;
+      }
+
+      input.focus();
+      input.select();
+      updateMenuPosition();
+      if (attempt < 8 && document.activeElement !== input) window.setTimeout(() => focusInput(attempt + 1), 50);
+    };
+    requestAnimationFrame(() => focusInput());
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key === "Tab") {
+      event.preventDefault();
+      event.stopPropagation();
+
+      const currentExactCode = validScaleCodeValue(draft, normalizedCodes);
+      const highlightedCode = suggestions[0];
+      const shouldAcceptHighlightedCode =
+        Boolean(highlightedCode && draft.trim()) && currentExactCode?.toLowerCase() !== highlightedCode?.toLowerCase();
+
+      if (highlightedCode && shouldAcceptHighlightedCode) {
+        committedValueRef.current = highlightedCode;
+        setDraft(highlightedCode);
+        setFocused(true);
+        setEditing(true);
+        requestAnimationFrame(() => {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        });
+        return;
+      }
+
+      commitEditor(currentExactCode);
+      setFocused(false);
+      setEditing(false);
+      focusAdjacentEditableGridCell(event.currentTarget, event.shiftKey ? -1 : 1);
+      return;
+    }
+
+    if (event.key === "Enter" && suggestions[0]) {
+      event.preventDefault();
+      event.stopPropagation();
+      commitEditor(suggestions[0]);
+      setFocused(false);
+      setEditing(false);
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      event.stopPropagation();
+      commitEditor(validScaleCodeValue(draft, normalizedCodes));
+      setEditing(false);
+      event.currentTarget.blur();
+    }
+
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      event.stopPropagation();
+      commitEditor(validScaleCodeValue(draft, normalizedCodes));
+      focusAdjacentEditableGridCell(event.currentTarget, event.key === "ArrowDown" ? 1 : -1);
+    }
+  }
+
+  const suggestionMenu =
+    focused && suggestions.length && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            className="student-name-suggestions scale-code-suggestions"
+            style={{ left: menuPosition.left, top: menuPosition.top, width: menuPosition.width }}
+          >
+            {suggestions.map((code, index) => (
+              <button
+                className={index === 0 ? "active" : ""}
+                key={code}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  chooseCode(code);
+                }}
+                type="button"
+              >
+                {code}
+                {index === 0 ? <span>Tab</span> : null}
+              </button>
+            ))}
+          </div>,
+          document.body
+        )
+      : null;
+
+  return (
+    <span className="scale-code-cell-shell" data-scale-cell-id={scaleCellId} ref={shellRef}>
+      <input
+        ref={inputRef}
+        className="scale-code-inline-input"
+        value={draft}
+        onBlur={() => {
+          if (!committingRef.current) commitEditor(validScaleCodeValue(draft, normalizedCodes));
+          committingRef.current = false;
+          setFocused(false);
+          setEditing(false);
+        }}
+        onChange={(event) => {
+          committedValueRef.current = event.target.value;
+          setDraft(event.target.value);
+        }}
+        onInput={(event) => {
+          const nextValue = event.currentTarget.value;
+          committedValueRef.current = nextValue;
+          setDraft(nextValue);
+          setFocused(true);
+        }}
+        onFocus={(event) => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          setMenuPosition({ top: bounds.bottom + 4, left: bounds.left, width: Math.max(160, bounds.width) });
+          setFocused(true);
+          setEditing(true);
+          requestAnimationFrame(() => event.currentTarget.select());
+        }}
+        onKeyDown={handleKeyDown}
+        onKeyDownCapture={handleKeyDown}
+        onKeyUp={(event) => {
+          committedValueRef.current = event.currentTarget.value;
+          setDraft(event.currentTarget.value);
+          setFocused(true);
+        }}
+      />
+      {suggestionMenu}
+    </span>
+  );
+});
+
+function DefaultValueHeader({
+  displayName,
+  onOpenDefaultValue
+}: {
+  displayName?: string;
+  onOpenDefaultValue?: () => void;
+}) {
+  return (
+    <span className="field-header-with-default">
+      <span className="field-header-label">{displayName}</span>
+      {onOpenDefaultValue ? (
+        <button
+          aria-label={`Set default value for ${displayName ?? "field"}`}
+          className="field-default-button"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onOpenDefaultValue();
+          }}
+          title="Set default value"
+          type="button"
+        >
+          +
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
+function normalizedDefaultFieldValue(field: AssessmentFieldTemplate, rawValue: string, scaleCodes: string[]) {
+  if (scaleCodes.length && (field.dataType === "letter" || field.dataType === "text")) {
+    return validScaleCodeValue(rawValue, scaleCodes);
+  }
+  return normalizedAssessmentValue(rawValue, field);
+}
+
 function fieldColumn(
   assessment: AssessmentTemplate,
   round: AssessmentRoundTemplate,
   field: AssessmentFieldTemplate,
   section?: AssessmentSectionTemplate,
-  extraCellClass = ""
+  extraCellClass = "",
+  commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void,
+  openDefaultValuePopup?: (target: DefaultValueTarget) => void
 ): ColDef<EntryRow> {
   const fieldName = assessmentValueKey(assessment, round, field, section);
+  const scaleCodes = scaleCodesForField(field);
+  const usesScaleCodeEditor = !field.isCalculated && (field.dataType === "letter" || field.dataType === "text") && scaleCodes.length > 0;
+  const canBulkDefault = isEditableAssessmentField(assessment, field);
+  const defaultValueTarget = {
+    fieldName,
+    field,
+    label: [round.label, section?.name, field.name].filter(Boolean).join(" / "),
+    scaleCodes
+  };
+  const scaleCodeParams = usesScaleCodeEditor
+    ? (params: { data?: EntryRow }) => ({
+        codes: scaleCodes,
+        fieldName,
+        rowId: params.data?.id,
+        commitScaleCodeValue
+      })
+    : undefined;
   return {
     colId: fieldName,
+    field: usesScaleCodeEditor ? fieldName : undefined,
     headerName: field.name,
+    headerComponent: DefaultValueHeader,
+    headerComponentParams: {
+      onOpenDefaultValue: canBulkDefault && openDefaultValuePopup ? () => openDefaultValuePopup(defaultValueTarget) : undefined
+    },
     width: field.name.length > 12 ? 150 : 104,
+    cellDataType: usesScaleCodeEditor ? false : undefined,
     editable: isEditableAssessmentField(assessment, field),
-    cellEditor: field.dataType === "integer" || field.dataType === "percentage" ? "agNumberCellEditor" : undefined,
+    cellRenderer: usesScaleCodeEditor ? ScaleCodeCellRenderer : undefined,
+    cellRendererParams: scaleCodeParams,
+    cellEditor: usesScaleCodeEditor
+      ? ScaleCodeCellRenderer
+      : field.dataType === "integer" || field.dataType === "percentage"
+        ? "agNumberCellEditor"
+        : undefined,
+    cellEditorParams: scaleCodeParams,
     valueGetter: (params) => params.data?.[fieldName] ?? null,
     valueSetter: (params) => {
       if (!params.data) return false;
-      const nextValue = normalizedAssessmentValue(params.newValue, field);
+      const nextValue = usesScaleCodeEditor
+        ? validScaleCodeValue(params.newValue, scaleCodes)
+        : normalizedAssessmentValue(params.newValue, field);
       if (params.data[fieldName] === nextValue) return false;
       params.data[fieldName] = nextValue;
       return true;
     },
     valueParser: (params) =>
       field.dataType === "integer" || field.dataType === "percentage" ? toNumber(params.newValue) : params.newValue,
-    cellClass: [field.isCalculated ? "locked-formula-cell" : "editable-score-cell", extraCellClass].filter(Boolean).join(" "),
+    cellClass: ["assessment-data-cell", field.isCalculated ? "locked-formula-cell" : "editable-score-cell", extraCellClass]
+      .filter(Boolean)
+      .join(" "),
     cellStyle: { backgroundColor: round.color ?? "#fffaf0" },
     headerClass: extraCellClass,
     headerStyle: { backgroundColor: round.color ?? "#fffaf0" },
@@ -4093,7 +5163,9 @@ function columnsForRound(
   assessment: AssessmentTemplate,
   round: AssessmentRoundTemplate,
   hiddenFieldIds: string[] = [],
-  hiddenSectionIds: string[] = []
+  hiddenSectionIds: string[] = [],
+  commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void,
+  openDefaultValuePopup?: (target: DefaultValueTarget) => void
 ): ColDef<EntryRow>[] {
   const fieldsForRound = assessment.fields.filter(
     (field) => !hiddenFieldIds.includes(field.id) && (!field.roundIds?.length || field.roundIds.includes(round.id))
@@ -4112,7 +5184,9 @@ function columnsForRound(
             round,
             field,
             section,
-            index === sectionFields.length - 1 ? "hierarchy-boundary-cell" : ""
+            index === sectionFields.length - 1 ? "hierarchy-boundary-cell" : "",
+            commitScaleCodeValue,
+            openDefaultValuePopup
           )
         )
       }];
@@ -4127,7 +5201,9 @@ function columnsForRound(
         round,
         field,
         undefined,
-        index === unsectionedFields.length - 1 ? "hierarchy-boundary-cell" : ""
+        index === unsectionedFields.length - 1 ? "hierarchy-boundary-cell" : "",
+        commitScaleCodeValue,
+        openDefaultValuePopup
       )
     )
   ];

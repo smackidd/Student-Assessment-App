@@ -143,4 +143,83 @@ describe("assessment entry rows", () => {
     expect(buildEntryRows([row], orf, { schoolYear: "2025-2026", grade: "4" })[0][assessmentValueKey(orf, fall, median)]).toBe(73);
     expect(buildEntryRows([row], orf, { schoolYear: "2026-2027", grade: "5" })[0][assessmentValueKey(orf, fall, median)]).toBe(75);
   });
+
+  it("calculates Quick Write percentile from CWS rank within the current year and grade cohort", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const fall = quickWrite.rounds[0];
+    const cws = quickWrite.fields.find((field) => field.id === "cws")!;
+    const percentile = quickWrite.fields.find((field) => field.id === "quick-write-percentile")!;
+    const context = { schoolYear: "2026-2027", grade: "3" };
+
+    const rows = [
+      { ...emptyRow(), id: "student-low", student: "Low Student" },
+      { ...emptyRow(), id: "student-mid", student: "Mid Student" },
+      { ...emptyRow(), id: "student-high", student: "High Student" }
+    ].map((row, index) =>
+      updateAssessmentRowFromTableEdit(row, quickWrite, assessmentValueKey(quickWrite, fall, cws), [10, 20, 30][index], context)
+    );
+    const entryRows = buildEntryRows(rows, quickWrite, context);
+    const percentileKey = assessmentValueKey(quickWrite, fall, percentile);
+
+    expect(entryRows[0][percentileKey]).toBe(17);
+    expect(entryRows[1][percentileKey]).toBe(50);
+    expect(entryRows[2][percentileKey]).toBe(83);
+  });
+
+  it("calculates Percentage from Score divided by Total in the current section", () => {
+    const template: AssessmentTemplate = {
+      id: "sectioned-percentage",
+      name: "Sectioned Percentage",
+      category: "Custom",
+      description: "Test percentage calculation.",
+      gradeScope: "Grade 3",
+      rounds: [{ id: "fall", label: "September / Fall", month: "September" }],
+      sections: [{ id: "domain-a", name: "Domain A", roundIds: ["fall"] }],
+      fields: [
+        {
+          id: "score",
+          name: "Score",
+          slug: "score",
+          dataType: "integer",
+          sectionIds: ["domain-a"],
+          isRequired: false,
+          isCalculated: false,
+          visibility: "evaluators"
+        },
+        {
+          id: "total",
+          name: "Total",
+          slug: "total",
+          dataType: "integer",
+          sectionIds: ["domain-a"],
+          isRequired: false,
+          isCalculated: false,
+          visibility: "evaluators"
+        },
+        {
+          id: "percentage",
+          name: "%",
+          slug: "percentage",
+          dataType: "calculated",
+          sectionIds: ["domain-a"],
+          isRequired: false,
+          isCalculated: true,
+          calculationKey: "percentage",
+          visibility: "evaluators"
+        }
+      ]
+    };
+    const fall = template.rounds[0];
+    const section = template.sections![0];
+    const score = template.fields[0];
+    const total = template.fields[1];
+    const percentage = template.fields[2];
+
+    let row = emptyRow();
+    row = updateAssessmentRowFromTableEdit(row, template, assessmentValueKey(template, fall, score, section), 18);
+    row = updateAssessmentRowFromTableEdit(row, template, assessmentValueKey(template, fall, total, section), 24);
+    const entry = buildEntryRows([row], template)[0];
+
+    expect(entry[assessmentValueKey(template, fall, percentage, section)]).toBe(75);
+  });
 });
