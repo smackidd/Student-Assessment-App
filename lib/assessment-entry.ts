@@ -34,8 +34,12 @@ export function buildEntryRows(
   });
 }
 
-export function buildOverviewRows(rows: OrfResultRow[], templates: AssessmentTemplate[]): EntryRow[] {
-  return buildEntryRows(rows, templates);
+export function buildOverviewRows(
+  rows: OrfResultRow[],
+  templates: AssessmentTemplate[],
+  context: AssessmentValueContext = {}
+): EntryRow[] {
+  return buildEntryRows(rows, templates, context);
 }
 
 function assignFieldValues(

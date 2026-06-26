@@ -52,6 +52,40 @@ type PrototypeWorkspaceState = {
     homeroom: string;
     status: "invited" | "active";
   }>;
+  auditEvents?: Array<{
+    id: string;
+    eventType: string;
+    entityType: string;
+    entityLabel: string;
+    description: string;
+    createdAt: string;
+    actor: string;
+    importLogId?: string;
+    revertedAt?: string;
+  }>;
+  importLogs?: Array<{
+    id: string;
+    fileName: string;
+    schoolYear: string;
+    grade: string;
+    createdAt: string;
+    importedCount: number;
+    dataCellCount: number;
+    duplicateNames: string[];
+    addedStudentIds: string[];
+    addedPlacements: Array<{
+      studentId: string;
+      schoolYear: string;
+      grade: string;
+      homeroom: string;
+    }>;
+    updatedRows: Array<{
+      studentId: string;
+      previousRow: OrfResultRow;
+      nextRow: OrfResultRow;
+    }>;
+    revertedAt?: string;
+  }>;
 };
 
 type GetPrototypeWorkspaceStateResult = {

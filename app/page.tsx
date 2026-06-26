@@ -118,7 +118,13 @@ type UserRole = (typeof roles)[number];
 type ProfilePageTab = "profile" | "password" | "audit" | "team";
 type StudentNotePermission = "admin_only" | "all";
 type SaveStatus = "saved" | "dirty" | "saving" | "error";
-type RecordAudit = (eventType: string, entityType: string, entityLabel: string, description: string) => void;
+type RecordAudit = (
+  eventType: string,
+  entityType: string,
+  entityLabel: string,
+  description: string,
+  options?: { importLogId?: string }
+) => string;
 type DefaultValueTarget = {
   fieldName: string;
   field: AssessmentFieldTemplate;
@@ -129,6 +135,7 @@ type OverviewDialog =
   | { type: "add" }
   | { type: "move"; studentId: string }
   | { type: "delete"; studentId: string }
+  | { type: "import" }
   | null;
 
 export default function StudentEvaluationApp() {
@@ -160,6 +167,7 @@ export default function StudentEvaluationApp() {
   const [uploadedReports, setUploadedReports] = useState<UploadedReport[]>([]);
   const [activeNoteStudentId, setActiveNoteStudentId] = useState<string | null>(null);
   const [overviewDialog, setOverviewDialog] = useState<OverviewDialog>(null);
+  const [importLogs, setImportLogs] = useState<ImportChangeLog[]>([]);
   const [auditEvents, setAuditEvents] = useState<AppAuditEvent[]>([
     {
       id: "audit-seed-1",
@@ -293,6 +301,8 @@ export default function StudentEvaluationApp() {
           setLockedOverviewYears(savedState.lockedOverviewYears ?? []);
           setCurrentUserRole(savedState.currentUserRole ?? "Vice Principal");
           if (savedState.userProfile) setUserProfile(savedState.userProfile);
+          if (savedState.auditEvents) setAuditEvents(savedState.auditEvents);
+          setImportLogs(savedState.importLogs ?? []);
           if (savedState.teamMembers) {
             const activatedTeam = activateSignedInMember(savedState.teamMembers, signedInUser);
             setTeamMembers(activatedTeam.members);
@@ -314,7 +324,9 @@ export default function StudentEvaluationApp() {
           lockedOverviewYears: [],
           currentUserRole,
           userProfile,
-          teamMembers
+          teamMembers,
+          auditEvents,
+          importLogs: []
         };
         setOrfRows([]);
         setOverviewPlacements([]);
@@ -383,6 +395,8 @@ export default function StudentEvaluationApp() {
     setCurrentUserRole(lastSavedWorkspaceState.currentUserRole ?? "Vice Principal");
     if (lastSavedWorkspaceState.userProfile) setUserProfile(lastSavedWorkspaceState.userProfile);
     if (lastSavedWorkspaceState.teamMembers) setTeamMembers(lastSavedWorkspaceState.teamMembers);
+    if (lastSavedWorkspaceState.auditEvents) setAuditEvents(lastSavedWorkspaceState.auditEvents);
+    setImportLogs(lastSavedWorkspaceState.importLogs ?? []);
     setDatabaseStudentNames(uniqueStudentNames(lastSavedWorkspaceState.rows));
     setOverviewDuplicateConflicts([]);
     setSaveStatus("saved");
@@ -443,7 +457,9 @@ export default function StudentEvaluationApp() {
         lockedOverviewYears,
         currentUserRole,
         userProfile,
-        teamMembers
+        teamMembers,
+        auditEvents,
+        importLogs
       };
       await savePrototypeWorkspaceState(workspaceState);
       const result = await saveStudentsToDatabase(orfRows);
@@ -748,20 +764,235 @@ export default function StudentEvaluationApp() {
     }
   }
 
-  function recordAudit(eventType: string, entityType: string, entityLabel: string, description: string) {
+  async function importOverviewSpreadsheet({ file, schoolYear, grade }: OverviewImportRequest): Promise<OverviewImportResult> {
+    const parsed = await parseStudentImportFile(file, templates);
+    const importId = `import-${Date.now()}`;
+    const importedAt = new Date().toISOString();
+    const existingRowsByName = new Map(orfRows.map((row) => [normalizedImportLabel(row.student), row]));
+    const existingNamesForYear = new Set(
+      overviewPlacements
+        .filter((placement) => placement.schoolYear === schoolYear)
+        .map((placement) => {
+          const row = orfRows.find((candidate) => candidate.id === placement.studentId);
+          return row ? normalizedImportLabel(row.student) : "";
+        })
+        .filter(Boolean)
+    );
+    const importedNamesForYear = new Set<string>();
+    const duplicateNames: string[] = [];
+    const addedStudentIds: string[] = [];
+    const addedPlacements: StudentPlacement[] = [];
+    const updatedRows: ImportUpdatedRowSnapshot[] = [];
+    let dataCellCount = 0;
+    const nextRowsById = new Map(orfRows.map((row) => [row.id, row]));
+
+    for (const importedStudent of parsed.students) {
+      const normalizedName = normalizedImportLabel(importedStudent.studentName);
+      if (existingNamesForYear.has(normalizedName) || importedNamesForYear.has(normalizedName)) {
+        duplicateNames.push(importedStudent.studentName);
+        continue;
+      }
+      importedNamesForYear.add(normalizedName);
+
+      const existingRow = existingRowsByName.get(normalizedName);
+      const baseRow =
+        existingRow ??
+        hydrateOrfRow({
+          id: `student-${Date.now()}-${addedStudentIds.length + 1}`,
+          homeroom: importedStudent.homeroom,
+          student: importedStudent.studentName,
+          assessmentValues: {},
+          septP1Wpm: null,
+          septP1Epm: null,
+          septP2Wpm: null,
+          septP2Epm: null,
+          septP3Wpm: null,
+          septP3Epm: null
+        });
+      let nextRow: OrfResultRow = {
+        ...baseRow,
+        student: importedStudent.studentName,
+        homeroom: importedStudent.homeroom,
+        assessmentValues: { ...(baseRow.assessmentValues ?? {}) }
+      };
+
+      importedStudent.values.forEach((cell) => {
+        if (cell.value === "" || cell.value === null || typeof cell.value === "undefined") return;
+        nextRow = updateAssessmentRowFromTableEdit(nextRow, cell.match.assessment, cell.match.fieldName, cell.value, {
+          schoolYear,
+          grade
+        });
+        dataCellCount += 1;
+      });
+
+      nextRowsById.set(nextRow.id, nextRow);
+      if (!existingRow) addedStudentIds.push(nextRow.id);
+      if (existingRow && JSON.stringify(existingRow) !== JSON.stringify(nextRow)) {
+        updatedRows.push({ studentId: nextRow.id, previousRow: existingRow, nextRow });
+      }
+
+      addedPlacements.push({
+        studentId: nextRow.id,
+        schoolYear,
+        grade,
+        homeroom: importedStudent.homeroom
+      });
+    }
+
+    const nextRows = Array.from(nextRowsById.values());
+    const nextPlacements = [...overviewPlacements, ...addedPlacements];
+    const nextYears = schoolYears.includes(schoolYear) ? schoolYears : [schoolYear, ...schoolYears].sort(compareSchoolYears).reverse();
+    const importLog: ImportChangeLog = {
+      id: importId,
+      fileName: file.name,
+      schoolYear,
+      grade,
+      createdAt: importedAt,
+      importedCount: addedPlacements.length,
+      dataCellCount,
+      duplicateNames: uniqueIds(duplicateNames),
+      addedStudentIds,
+      addedPlacements,
+      updatedRows
+    };
+    const auditEvent = createAuditEvent(
+      "Imported spreadsheet",
+      "Overview import",
+      `${schoolYear} / Grade ${grade}`,
+      `Imported ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} from ${file.name}. ${duplicateNames.length} duplicate${duplicateNames.length === 1 ? "" : "s"} skipped.`,
+      { importLogId: importId }
+    );
+    const nextImportLogs = [importLog, ...importLogs];
+    const nextAuditEvents = [auditEvent, ...auditEvents];
+    const workspaceState: SavedWorkspaceState = {
+      rows: nextRows,
+      placements: nextPlacements,
+      templates,
+      schoolYears: nextYears,
+      lockedOverviewYears,
+      currentUserRole,
+      userProfile,
+      teamMembers,
+      auditEvents: nextAuditEvents,
+      importLogs: nextImportLogs
+    };
+
+    await savePrototypeWorkspaceState(workspaceState);
+    try {
+      if (addedStudentIds.length || updatedRows.length) await saveStudentsToDatabase(nextRows);
+    } catch (error) {
+      if (!isStudentNumberConstraintError(error)) throw error;
+      if (!duplicateNames.length) throw new Error("Some imported students already exist in Firebase. Review duplicate student names and try again.");
+    }
+    setOrfRows(nextRows);
+    setOverviewPlacements(nextPlacements);
+    setSchoolYears(nextYears);
+    setSelectedOverviewYear(schoolYear);
+    setSelectedOverviewGrade(grade);
+    setImportLogs(nextImportLogs);
+    setAuditEvents(nextAuditEvents);
+    setLastSavedWorkspaceState(workspaceState);
+    setDatabaseStudentNames(uniqueStudentNames(nextRows));
+    setOverviewDuplicateConflicts([]);
+    setSaveStatus("saved");
+    setSaveMessage(`Import complete. ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} imported and saved to Firebase.`);
+
+    return {
+      importLogId: importId,
+      fileName: file.name,
+      schoolYear,
+      grade,
+      importedCount: addedPlacements.length,
+      dataCellCount,
+      duplicateNames: uniqueIds(duplicateNames)
+    };
+  }
+
+  async function revertImport(importLogId: string) {
+    const importLog = importLogs.find((log) => log.id === importLogId);
+    if (!importLog || importLog.revertedAt) return;
+    if (!window.confirm(`Revert the import from ${importLog.fileName}? This will remove imported placements and restore changed assessment values.`)) return;
+
+    const addedStudentIds = new Set(importLog.addedStudentIds);
+    const previousRowsById = new Map(importLog.updatedRows.map((snapshot) => [snapshot.studentId, snapshot.previousRow]));
+    const nextRows = orfRows
+      .filter((row) => !addedStudentIds.has(row.id))
+      .map((row) => previousRowsById.get(row.id) ?? row);
+    const nextPlacements = overviewPlacements.filter(
+      (placement) =>
+        !importLog.addedPlacements.some(
+          (added) =>
+            added.studentId === placement.studentId &&
+            added.schoolYear === placement.schoolYear &&
+            added.grade === placement.grade &&
+            added.homeroom === placement.homeroom
+        )
+    );
+    const revertedAt = new Date().toISOString();
+    const nextImportLogs = importLogs.map((log) => (log.id === importLogId ? { ...log, revertedAt } : log));
+    const revertAuditEvent = createAuditEvent(
+      "Reverted import",
+      "Overview import",
+      `${importLog.schoolYear} / Grade ${importLog.grade}`,
+      `Reverted imported students and assessment values from ${importLog.fileName}.`,
+      { importLogId }
+    );
+    const nextAuditEvents = auditEvents
+      .map((event) => (event.importLogId === importLogId ? { ...event, revertedAt } : event))
+      .concat(revertAuditEvent)
+      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+    const workspaceState: SavedWorkspaceState = {
+      rows: nextRows,
+      placements: nextPlacements,
+      templates,
+      schoolYears,
+      lockedOverviewYears,
+      currentUserRole,
+      userProfile,
+      teamMembers,
+      auditEvents: nextAuditEvents,
+      importLogs: nextImportLogs
+    };
+
+    await savePrototypeWorkspaceState(workspaceState);
+    await saveStudentsToDatabase(nextRows);
+    setOrfRows(nextRows);
+    setOverviewPlacements(nextPlacements);
+    setImportLogs(nextImportLogs);
+    setAuditEvents(nextAuditEvents);
+    setLastSavedWorkspaceState(workspaceState);
+    setDatabaseStudentNames(uniqueStudentNames(nextRows));
+    setSaveStatus("saved");
+    setSaveMessage(`Reverted import from ${importLog.fileName} and saved the rollback to Firebase.`);
+  }
+
+  function createAuditEvent(
+    eventType: string,
+    entityType: string,
+    entityLabel: string,
+    description: string,
+    options?: { importLogId?: string }
+  ): AppAuditEvent {
     const createdAt = new Date().toISOString();
+    return {
+      id: `audit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      eventType,
+      entityType,
+      entityLabel,
+      description,
+      createdAt,
+      actor: "VP workspace",
+      importLogId: options?.importLogId
+    };
+  }
+
+  function recordAudit(eventType: string, entityType: string, entityLabel: string, description: string, options?: { importLogId?: string }) {
+    const event = createAuditEvent(eventType, entityType, entityLabel, description, options);
     setAuditEvents((current) => [
-      {
-        id: `audit-${Date.now()}-${current.length + 1}`,
-        eventType,
-        entityType,
-        entityLabel,
-        description,
-        createdAt,
-        actor: "VP workspace"
-      },
+      event,
       ...current
     ]);
+    return event.id;
   }
 
   if (!authReady) {
@@ -944,6 +1175,7 @@ export default function StudentEvaluationApp() {
             onYearChange={setSelectedOverviewYear}
             onGradeChange={setSelectedOverviewGrade}
             onAddYear={addSchoolYear}
+            onOpenImport={() => setOverviewDialog({ type: "import" })}
             onOpenAdd={() => setOverviewDialog({ type: "add" })}
             onMoveStudent={(studentId) => setOverviewDialog({ type: "move", studentId })}
             onDeleteStudent={(studentId) => setOverviewDialog({ type: "delete", studentId })}
@@ -1000,6 +1232,8 @@ export default function StudentEvaluationApp() {
             teamMembers={teamMembers}
             setTeamMembers={setTeamMembers}
             events={auditEvents}
+            importLogs={importLogs}
+            onRevertImport={revertImport}
             authUser={authUser}
             openInvite={() => setInviteDialogOpen(true)}
             markUnsaved={markUnsaved}
@@ -1029,6 +1263,16 @@ export default function StudentEvaluationApp() {
           selectedGrade={selectedOverviewGrade}
           onClose={() => setOverviewDialog(null)}
           onAdd={addHomeroomWithStudents}
+        />
+      ) : null}
+
+      {overviewDialog?.type === "import" ? (
+        <OverviewImportModal
+          currentYear={selectedOverviewYear}
+          currentGrade={selectedOverviewGrade}
+          onClose={() => setOverviewDialog(null)}
+          onImport={importOverviewSpreadsheet}
+          onRevert={revertImport}
         />
       ) : null}
 
@@ -1103,6 +1347,43 @@ type WorkspaceStudentSnapshot = {
   placements: StudentPlacement[];
 };
 
+type ImportUpdatedRowSnapshot = {
+  studentId: string;
+  previousRow: OrfResultRow;
+  nextRow: OrfResultRow;
+};
+
+type ImportChangeLog = {
+  id: string;
+  fileName: string;
+  schoolYear: string;
+  grade: string;
+  createdAt: string;
+  importedCount: number;
+  dataCellCount: number;
+  duplicateNames: string[];
+  addedStudentIds: string[];
+  addedPlacements: StudentPlacement[];
+  updatedRows: ImportUpdatedRowSnapshot[];
+  revertedAt?: string;
+};
+
+type OverviewImportRequest = {
+  file: File;
+  schoolYear: string;
+  grade: string;
+};
+
+type OverviewImportResult = {
+  importLogId: string;
+  fileName: string;
+  schoolYear: string;
+  grade: string;
+  importedCount: number;
+  dataCellCount: number;
+  duplicateNames: string[];
+};
+
 type SavedWorkspaceState = WorkspaceStudentSnapshot & {
   templates: AssessmentTemplate[];
   schoolYears: string[];
@@ -1115,6 +1396,8 @@ type SavedWorkspaceState = WorkspaceStudentSnapshot & {
     homeroom: string;
   };
   teamMembers?: TeamMember[];
+  auditEvents?: AppAuditEvent[];
+  importLogs?: ImportChangeLog[];
 };
 
 type TeamMember = {
@@ -1145,6 +1428,8 @@ type AppAuditEvent = {
   description: string;
   createdAt: string;
   actor: string;
+  importLogId?: string;
+  revertedAt?: string;
 };
 
 function AuthScreen() {
@@ -2268,6 +2553,7 @@ function VpOverview({
   onYearChange,
   onGradeChange,
   onAddYear,
+  onOpenImport,
   onOpenAdd,
   onMoveStudent,
   onDeleteStudent,
@@ -2293,6 +2579,7 @@ function VpOverview({
   onYearChange: (year: string) => void;
   onGradeChange: (grade: string) => void;
   onAddYear: () => void;
+  onOpenImport: () => void;
   onOpenAdd: () => void;
   onMoveStudent: (studentId: string) => void;
   onDeleteStudent: (studentId: string) => void;
@@ -2313,7 +2600,10 @@ function VpOverview({
   const [hiddenSectionIds, setHiddenSectionIds] = useState<string[]>([]);
   const [hiddenFieldIds, setHiddenFieldIds] = useState<string[]>([]);
   const duplicateStudentIds = useMemo(() => duplicateConflicts.map((conflict) => conflict.studentId), [duplicateConflicts]);
-  const rowData = useMemo(() => buildOverviewRows(rows, templates), [rows, templates]);
+  const rowData = useMemo(
+    () => buildOverviewRows(rows, templates, { schoolYear: selectedYear, grade: selectedGrade }),
+    [rows, selectedGrade, selectedYear, templates]
+  );
   const columnDefs = useMemo<ColDef<EntryRow>[]>(
     () => [
       { field: "homeroom", headerName: "HR", pinned: "left", width: 90, filter: true },
@@ -2369,6 +2659,10 @@ function VpOverview({
     <section className={fullScreen ? "overview-panel table-card-fullscreen" : "overview-panel"}>
       <div className="panel overview-table-panel">
         <div className="overview-toolbar">
+          <button className="small-action" onClick={onOpenImport} type="button">
+            Import
+          </button>
+
           <label>
             Year
             <select
@@ -2390,7 +2684,7 @@ function VpOverview({
           </label>
 
           <button className="small-action" onClick={onAddYear} type="button">
-            Add new year
+            Add Year
           </button>
 
           <label>
@@ -2930,6 +3224,8 @@ function ProfilePage({
   teamMembers,
   setTeamMembers,
   events,
+  importLogs,
+  onRevertImport,
   authUser,
   openInvite,
   markUnsaved,
@@ -2947,6 +3243,8 @@ function ProfilePage({
   teamMembers: TeamMember[];
   setTeamMembers: React.Dispatch<React.SetStateAction<TeamMember[]>>;
   events: AppAuditEvent[];
+  importLogs: ImportChangeLog[];
+  onRevertImport: (importLogId: string) => Promise<void>;
   authUser: User | null;
   openInvite: () => void;
   markUnsaved: (message?: string) => void;
@@ -3123,7 +3421,7 @@ function ProfilePage({
         </div>
       ) : null}
 
-      {visibleTab === "audit" ? <AuditLog events={events} /> : null}
+      {visibleTab === "audit" ? <AuditLog events={events} importLogs={importLogs} onRevertImport={onRevertImport} /> : null}
 
       {visibleTab === "team" ? (
         <div className="panel team-panel">
@@ -3599,6 +3897,240 @@ function safeFileName(value: string) {
   return value.replace(/[<>:"/\\|?*\x00-\x1f]/g, "-").replace(/\s+/g, " ").trim() || "student-assessment-report";
 }
 
+function downloadCsvFile(fileName: string, rows: string[][]) {
+  const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(value: string) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function isStudentNumberConstraintError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("student_studentNumber_uidx") || message.includes("ALREADY_EXISTS");
+}
+
+function readableImportError(error: unknown) {
+  if (isStudentNumberConstraintError(error)) {
+    return "Some students in this file already exist in Firebase for the selected year. Review the duplicate student list, then download it as CSV if needed.";
+  }
+  return error instanceof Error ? error.message : "Import failed.";
+}
+
+type ImportColumnMatch = {
+  assessment: AssessmentTemplate;
+  fieldName: string;
+};
+
+type ParsedImportStudent = {
+  studentName: string;
+  homeroom: string;
+  values: Array<{
+    value: string | number | boolean | Date | null;
+    match: ImportColumnMatch;
+  }>;
+};
+
+type ParsedImportFile = {
+  students: ParsedImportStudent[];
+};
+
+async function parseStudentImportFile(file: File, templates: AssessmentTemplate[]): Promise<ParsedImportFile> {
+  if (file.name.toLowerCase().endsWith(".gsheet")) {
+    throw new Error("Google Sheets shortcut files cannot be read directly. Export the sheet as Excel or CSV, then import that file.");
+  }
+
+  const workbook = file.name.toLowerCase().endsWith(".csv")
+    ? XLSX.read(await file.text(), { type: "string" })
+    : XLSX.read(await file.arrayBuffer(), { type: "array" });
+  const firstSheetName = workbook.SheetNames[0];
+  const worksheet = firstSheetName ? workbook.Sheets[firstSheetName] : null;
+  if (!worksheet) throw new Error("The selected file does not include a readable worksheet.");
+
+  const rows = worksheetToImportRows(worksheet);
+  const headerLocation = findStudentHeaderLocation(rows);
+  if (!headerLocation) {
+    throw new Error("Import stopped: no Student Name column was found.");
+  }
+
+  const { rowIndex: headerRowIndex, columnIndex: studentColumnIndex } = headerLocation;
+  const homeroomColumnIndex = findHomeroomColumnIndex(rows[headerRowIndex] ?? []);
+  const importColumns = rows[headerRowIndex].map((_, columnIndex) => {
+    if (columnIndex === studentColumnIndex || columnIndex === homeroomColumnIndex) return null;
+    const headers = columnHeadersForImportColumn(rows, headerRowIndex, columnIndex);
+    return findImportColumnMatch(headers, templates);
+  });
+  const students = rows
+    .slice(headerRowIndex + 1)
+    .map((row): ParsedImportStudent | null => {
+      const studentName = importCellText(row[studentColumnIndex]);
+      if (!studentName) return null;
+      const homeroom = homeroomColumnIndex >= 0 ? importCellText(row[homeroomColumnIndex]) || "Imported" : "Imported";
+      return {
+        studentName,
+        homeroom,
+        values: importColumns
+          .map((match, columnIndex) => {
+            if (!match) return null;
+            return {
+              value: row[columnIndex] ?? null,
+              match
+            };
+          })
+          .filter((item): item is ParsedImportStudent["values"][number] => Boolean(item))
+      };
+    })
+    .filter((student): student is ParsedImportStudent => Boolean(student));
+
+  return { students };
+}
+
+function worksheetToImportRows(worksheet: XLSX.WorkSheet) {
+  const range = XLSX.utils.decode_range(String(worksheet["!ref"] ?? "A1:A1"));
+  const merges = (worksheet["!merges"] as XLSX.Range[] | undefined) ?? [];
+  const rows: Array<Array<string | number | boolean | Date | null>> = [];
+
+  for (let row = range.s.r; row <= range.e.r; row += 1) {
+    const nextRow: Array<string | number | boolean | Date | null> = [];
+    for (let column = range.s.c; column <= range.e.c; column += 1) {
+      nextRow.push(importWorksheetCellValue(worksheet, row, column, merges));
+    }
+    rows.push(nextRow);
+  }
+
+  return rows;
+}
+
+function importWorksheetCellValue(worksheet: XLSX.WorkSheet, row: number, column: number, merges: XLSX.Range[]) {
+  const mergedRange = merges.find((merge) => row >= merge.s.r && row <= merge.e.r && column >= merge.s.c && column <= merge.e.c);
+  const source = mergedRange?.s ?? { r: row, c: column };
+  const cell = worksheet[XLSX.utils.encode_cell(source)];
+  return (cell?.v ?? null) as string | number | boolean | Date | null;
+}
+
+function findStudentHeaderLocation(rows: Array<Array<unknown>>) {
+  const searchRows = rows.slice(0, 12);
+  for (let rowIndex = 0; rowIndex < searchRows.length; rowIndex += 1) {
+    const columnIndex = searchRows[rowIndex].findIndex((cell) => studentHeaderLabels.has(normalizedImportLabel(cell)));
+    if (columnIndex >= 0) return { rowIndex, columnIndex };
+  }
+  return null;
+}
+
+function findHomeroomColumnIndex(headerRow: Array<unknown>) {
+  return headerRow.findIndex((cell) => homeroomHeaderLabels.has(normalizedImportLabel(cell)));
+}
+
+function columnHeadersForImportColumn(rows: Array<Array<unknown>>, headerRowIndex: number, columnIndex: number) {
+  const firstHeaderRow = Math.max(0, headerRowIndex - 3);
+  return rows
+    .slice(firstHeaderRow, headerRowIndex + 1)
+    .map((row, index) => importCellText(headerValueForImportColumn(row, columnIndex, index < 2)))
+    .filter(Boolean);
+}
+
+function headerValueForImportColumn(row: Array<unknown>, columnIndex: number, allowForwardFill: boolean) {
+  const directValue = row[columnIndex];
+  if (importCellText(directValue) || !allowForwardFill) return directValue;
+
+  for (let index = columnIndex - 1; index >= 0; index -= 1) {
+    const candidate = row[index];
+    if (importCellText(candidate)) return candidate;
+  }
+
+  return directValue;
+}
+
+function findImportColumnMatch(headers: string[], templates: AssessmentTemplate[]): ImportColumnMatch | null {
+  if (!headers.length) return null;
+  const normalizedHeaders = headers.map(normalizedImportLabel).filter(Boolean);
+
+  for (const assessment of templates) {
+    if (!looseHeaderLabelMatch(normalizedHeaders, [assessment.name, assessment.id])) continue;
+    for (const round of assessment.rounds) {
+      if (!looseHeaderLabelMatch(normalizedHeaders, [round.label, round.month, windowIndicatorForRound(round), round.id])) continue;
+      const sectionsForRound = sectionsForAssessmentRound(assessment, round);
+      for (const field of assessment.fields) {
+        if (!fieldMatchesRound(field, round) || !fieldHeaderLabelMatch(normalizedHeaders, field)) continue;
+        const fieldSections = sectionsForRound.filter((section) => field.sectionIds?.includes(section.id));
+        if (!fieldSections.length) {
+          return { assessment, fieldName: assessmentValueKey(assessment, round, field) };
+        }
+        const section = fieldSections.find((candidate) => exactHeaderLabelMatch(normalizedHeaders, [candidate.name, candidate.id]));
+        if (section) return { assessment, fieldName: assessmentValueKey(assessment, round, field, section) };
+      }
+    }
+  }
+
+  return null;
+}
+
+function fieldMatchesRound(field: AssessmentFieldTemplate, round: AssessmentRoundTemplate) {
+  return !field.roundIds?.length || field.roundIds.includes(round.id);
+}
+
+function exactHeaderLabelMatch(normalizedHeaders: string[], labels: Array<string | undefined>) {
+  return labels.some((label) => {
+    const normalizedLabel = normalizedImportLabel(label);
+    return Boolean(normalizedLabel && normalizedHeaders.includes(normalizedLabel));
+  });
+}
+
+function fieldHeaderLabelMatch(normalizedHeaders: string[], field: AssessmentFieldTemplate) {
+  const compactHeaderPath = normalizedHeaders.join("");
+  return [field.name, field.slug, field.id].some((label) => {
+    const normalizedLabel = normalizedImportLabel(label);
+    if (!normalizedLabel) return false;
+    return normalizedHeaders.includes(normalizedLabel) || compactHeaderPath.includes(normalizedLabel);
+  });
+}
+
+function looseHeaderLabelMatch(normalizedHeaders: string[], labels: Array<string | undefined>) {
+  const compactHeaderPath = normalizedHeaders.join("");
+  return labels.some((label) => {
+    const normalizedLabel = normalizedImportLabel(label);
+    if (!normalizedLabel) return false;
+    return (
+      normalizedHeaders.includes(normalizedLabel) ||
+      compactHeaderPath.includes(normalizedLabel) ||
+      normalizedHeaders.some((header) => header.includes(normalizedLabel) || normalizedLabel.includes(header))
+    );
+  });
+}
+
+const studentHeaderLabels = new Set(["studentname", "student", "name", "studentfullname", "fullname"]);
+const homeroomHeaderLabels = new Set(["homeroom", "home room", "hr", "classroom", "class"]);
+
+function normalizedImportLabel(value: unknown) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function importCellText(value: unknown) {
+  return String(value ?? "").trim();
+}
+
+function schoolYearImportOptions() {
+  const startYear = new Date().getFullYear();
+  return Array.from({ length: 21 }, (_, index) => {
+    const year = startYear - index;
+    return `${year}-${year + 1}`;
+  });
+}
+
 type ScaleRow = {
   title: string;
   code: string;
@@ -3810,6 +4342,185 @@ function AddHomeroomModal({
         <button className="primary-action" onClick={() => onAdd(homeroom, studentCount)} type="button">
           Add
         </button>
+      </section>
+    </div>
+  );
+}
+
+function OverviewImportModal({
+  currentYear,
+  currentGrade,
+  onClose,
+  onImport,
+  onRevert
+}: {
+  currentYear: string;
+  currentGrade: string;
+  onClose: () => void;
+  onImport: (request: OverviewImportRequest) => Promise<OverviewImportResult>;
+  onRevert: (importLogId: string) => Promise<void>;
+}) {
+  const [schoolYear, setSchoolYear] = useState(currentYear);
+  const [grade, setGrade] = useState(currentGrade);
+  const [file, setFile] = useState<File | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [status, setStatus] = useState<"idle" | "importing" | "complete" | "reverted" | "error">("idle");
+  const [message, setMessage] = useState("Choose an Excel, Google Sheets export, or CSV file to import.");
+  const [result, setResult] = useState<OverviewImportResult | null>(null);
+  const yearOptions = useMemo(() => schoolYearImportOptions(), []);
+
+  async function startImport() {
+    if (!file) {
+      setStatus("error");
+      setMessage("Choose a spreadsheet or CSV file before importing.");
+      return;
+    }
+
+    setStatus("importing");
+    setMessage("Importing students and matching assessment data...");
+    try {
+      const nextResult = await onImport({ file, schoolYear, grade });
+      setResult(nextResult);
+      setStatus("complete");
+      setMessage("Import complete.");
+    } catch (error) {
+      setStatus("error");
+      setMessage(readableImportError(error));
+    }
+  }
+
+  async function revertImport() {
+    if (!result) return;
+    setStatus("importing");
+    setMessage("Reverting this import...");
+    await onRevert(result.importLogId);
+    setStatus("reverted");
+    setMessage("Import reverted.");
+  }
+
+  function chooseFile(nextFile: File | undefined) {
+    if (!nextFile) return;
+    setFile(nextFile);
+    setStatus("idle");
+    setResult(null);
+    setMessage(`${nextFile.name} is ready to import.`);
+  }
+
+  function downloadDuplicateCsv() {
+    if (!result?.duplicateNames.length) return;
+    downloadCsvFile(
+      `${safeFileName(`${result.schoolYear}-grade-${result.grade}-duplicate-students`)}.csv`,
+      [["Student Name"], ...result.duplicateNames.map((name) => [name])]
+    );
+  }
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Import student spreadsheet">
+      <section className="notes-modal import-modal panel">
+        <div className="modal-top">
+          <div>
+            <p className="eyebrow">Overview import</p>
+            <h2>Import students and assessment data</h2>
+          </div>
+          <button className="small-action ghost" onClick={onClose} type="button">
+            Close
+          </button>
+        </div>
+
+        <div className="import-controls">
+          <label>
+            Year
+            <select value={schoolYear} onChange={(event) => setSchoolYear(event.target.value)}>
+              {yearOptions.map((year) => (
+                <option key={year} value={year}>
+                  {year}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Grade
+            <select value={grade} onChange={(event) => setGrade(event.target.value)}>
+              {["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((item) => (
+                <option key={item} value={item}>
+                  Grade {item}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+
+        <label
+          className={dragging ? "import-drop-zone is-dragging" : "import-drop-zone"}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+            chooseFile(event.dataTransfer.files[0]);
+          }}
+        >
+          <span>Drop spreadsheet here</span>
+          <strong>{file ? file.name : "No file selected"}</strong>
+          <small>Supports .xlsx, .xls, .csv, and exported Google Sheets files.</small>
+          <input
+            accept=".xlsx,.xls,.csv,.ods,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+            type="file"
+            onChange={(event) => chooseFile(event.target.files?.[0])}
+          />
+        </label>
+
+        <div className={`import-status ${status}`} role="status">
+          {message}
+        </div>
+
+        {result ? (
+          <div className="import-results">
+            <strong>Import complete</strong>
+            <span>
+              Imported {result.importedCount} student{result.importedCount === 1 ? "" : "s"} and {result.dataCellCount} assessment value
+              {result.dataCellCount === 1 ? "" : "s"}.
+            </span>
+            {result.duplicateNames.length ? (
+              <div className="import-duplicate-section">
+                <div className="import-duplicate-heading">
+                  <p>Duplicate names skipped for {result.schoolYear}:</p>
+                  <button className="small-action" onClick={downloadDuplicateCsv} type="button">
+                    Download CSV
+                  </button>
+                </div>
+                <ul className="import-duplicate-list">
+                  {result.duplicateNames.map((name) => (
+                    <li key={name}>{name}</li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <span>No duplicate student names were found for this year.</span>
+            )}
+          </div>
+        ) : null}
+
+        <div className="modal-actions">
+          {result && status !== "reverted" ? (
+            <>
+              <button className="danger-action" onClick={revertImport} type="button">
+                Revert
+              </button>
+              <button className="primary-action" onClick={onClose} type="button">
+                Confirm
+              </button>
+            </>
+          ) : (
+            <button className="primary-action" disabled={status === "importing"} onClick={startImport} type="button">
+              {status === "importing" ? "Importing..." : "Import"}
+            </button>
+          )}
+        </div>
       </section>
     </div>
   );
@@ -4241,7 +4952,15 @@ function ReportFiles({
   );
 }
 
-function AuditLog({ events }: { events: AppAuditEvent[] }) {
+function AuditLog({
+  events,
+  importLogs,
+  onRevertImport
+}: {
+  events: AppAuditEvent[];
+  importLogs: ImportChangeLog[];
+  onRevertImport: (importLogId: string) => Promise<void>;
+}) {
   const [filter, setFilter] = useState("");
   const [sortKey, setSortKey] = useState<"createdAt" | "eventType" | "entityType" | "entityLabel">("createdAt");
   const sortedEvents = useMemo(() => {
@@ -4307,16 +5026,30 @@ function AuditLog({ events }: { events: AppAuditEvent[] }) {
             <span>Description</span>
             <span>Actor</span>
             <span>Date</span>
+            <span>Action</span>
           </div>
-          {sortedEvents.map((event) => (
-            <div className="audit-table-row" role="row" key={event.id}>
-              <span className="audit-type">{event.eventType}</span>
-              <span>{event.entityLabel}</span>
-              <span>{event.description}</span>
-              <span>{event.actor}</span>
-              <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
-            </div>
-          ))}
+          {sortedEvents.map((event) => {
+            const importLog = event.importLogId ? importLogs.find((log) => log.id === event.importLogId) : null;
+            const canRevert = Boolean(importLog && !importLog.revertedAt && event.eventType === "Imported spreadsheet");
+            return (
+              <div className="audit-table-row" role="row" key={event.id}>
+                <span className="audit-type">{event.eventType}</span>
+                <span>{event.entityLabel}</span>
+                <span>{event.revertedAt ? `${event.description} Reverted.` : event.description}</span>
+                <span>{event.actor}</span>
+                <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
+                <span>
+                  {canRevert && importLog ? (
+                    <button className="small-action audit-revert-action" onClick={() => onRevertImport(importLog.id)} type="button">
+                      Revert
+                    </button>
+                  ) : (
+                    "-"
+                  )}
+                </span>
+              </div>
+            );
+          })}
         </div>
       </div>
     </section>
