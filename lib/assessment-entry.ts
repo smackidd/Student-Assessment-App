@@ -207,17 +207,42 @@ export function calculateOrfWindow(
   const wpmField = assessment.fields.find((field) => assessmentFieldMeaning(field) === "wpm");
   const epmField = assessment.fields.find((field) => assessmentFieldMeaning(field) === "epm");
   const cwpmField = assessment.fields.find((field) => assessmentFieldMeaning(field) === "cwpm");
+  const useLegacyFallback = !hasScopedAssessmentContext(context);
 
   const passages = [0, 1, 2].map((index) => {
     const section = sections[index];
     const wpm = wpmField
-      ? storedAssessmentNumber(row, assessment, round, wpmField, section, legacyOrfFallback(row, round, index, "wpm"), context)
+      ? storedAssessmentNumber(
+          row,
+          assessment,
+          round,
+          wpmField,
+          section,
+          useLegacyFallback ? legacyOrfFallback(row, round, index, "wpm") : null,
+          context
+        )
       : null;
     const epm = epmField
-      ? storedAssessmentNumber(row, assessment, round, epmField, section, legacyOrfFallback(row, round, index, "epm"), context)
+      ? storedAssessmentNumber(
+          row,
+          assessment,
+          round,
+          epmField,
+          section,
+          useLegacyFallback ? legacyOrfFallback(row, round, index, "epm") : null,
+          context
+        )
       : null;
     const storedCwpm = cwpmField
-      ? storedAssessmentNumber(row, assessment, round, cwpmField, section, legacyOrfFallback(row, round, index, "cwpm"), context)
+      ? storedAssessmentNumber(
+          row,
+          assessment,
+          round,
+          cwpmField,
+          section,
+          useLegacyFallback ? legacyOrfFallback(row, round, index, "cwpm") : null,
+          context
+        )
       : null;
     const cwpm = typeof storedCwpm === "number" ? storedCwpm : calculateCwpm(wpm, epm);
 
@@ -387,7 +412,7 @@ export function assessmentValueKeys(
       .join("__")
   ];
   const scopedPrefix = assessmentContextPrefix(context);
-  return uniqueIds(scopedPrefix ? baseKeys.map((key) => `${scopedPrefix}__${key}`).concat(baseKeys) : baseKeys);
+  return uniqueIds(scopedPrefix ? baseKeys.map((key) => `${scopedPrefix}__${key}`) : baseKeys);
 }
 
 function storedAssessmentValue(
@@ -409,6 +434,10 @@ function assessmentContextPrefix(context: AssessmentValueContext) {
     context.grade ? `grade_${context.grade}` : undefined
   ].filter((value): value is string => Boolean(value));
   return parts.length ? parts.map(slugForAssessmentKey).join("__") : "";
+}
+
+function hasScopedAssessmentContext(context: AssessmentValueContext) {
+  return Boolean(context.schoolYear || context.grade);
 }
 
 function labelWithId(label: string, id: string) {

@@ -144,6 +144,36 @@ describe("assessment entry rows", () => {
     expect(buildEntryRows([row], orf, { schoolYear: "2026-2027", grade: "5" })[0][assessmentValueKey(orf, fall, median)]).toBe(75);
   });
 
+  it("does not show prior unscoped ORF values when a student is viewed in a new school year", () => {
+    const orf = customOrfTemplate();
+    const fall = orf.rounds[0];
+    const sections = sectionsForAssessmentRound(orf, fall);
+    const wpm = orf.fields.find((field) => field.id === "wpm")!;
+    const epm = orf.fields.find((field) => field.id === "epm")!;
+    const median = orf.fields.find((field) => field.id === "orf_med_4")!;
+
+    let row = emptyRow();
+    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, wpm, sections[0]), 81);
+    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, epm, sections[0]), 6);
+
+    const newYearEntry = buildEntryRows([row], orf, { schoolYear: "2026-2027", grade: "4" })[0];
+
+    expect(newYearEntry[assessmentValueKey(orf, fall, wpm, sections[0])]).toBeNull();
+    expect(newYearEntry[assessmentValueKey(orf, fall, epm, sections[0])]).toBeNull();
+    expect(newYearEntry[assessmentValueKey(orf, fall, median)]).toBeNull();
+  });
+
+  it("does not show prior unscoped non-ORF values when a student is viewed in a new school year", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const fall = quickWrite.rounds[0];
+    const tww = quickWrite.fields.find((field) => field.id === "tww")!;
+
+    const row = updateAssessmentRowFromTableEdit(emptyRow(), quickWrite, assessmentValueKey(quickWrite, fall, tww), 120);
+    const newYearEntry = buildEntryRows([row], quickWrite, { schoolYear: "2026-2027", grade: "4" })[0];
+
+    expect(newYearEntry[assessmentValueKey(quickWrite, fall, tww)]).toBeNull();
+  });
+
   it("calculates Quick Write percentile from CWS rank within the current year and grade cohort", () => {
     const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
     const fall = quickWrite.rounds[0];

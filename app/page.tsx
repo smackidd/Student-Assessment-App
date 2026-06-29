@@ -161,6 +161,7 @@ export default function StudentEvaluationApp() {
   const [unsavedAlertDismissed, setUnsavedAlertDismissed] = useState(false);
   const [databaseStudentNames, setDatabaseStudentNames] = useState<string[]>([]);
   const [overviewDuplicateConflicts, setOverviewDuplicateConflicts] = useState<DuplicateStudentNameConflict[]>([]);
+  const [overviewChangedStudentIds, setOverviewChangedStudentIds] = useState<Set<string>>(new Set());
   const [lastSavedWorkspaceState, setLastSavedWorkspaceState] = useState<SavedWorkspaceState | null>(null);
   const [lockedOverviewYears, setLockedOverviewYears] = useState<string[]>([]);
   const [overviewPlacements, setOverviewPlacements] = useState<StudentPlacement[]>([]);
@@ -298,6 +299,7 @@ export default function StudentEvaluationApp() {
           setSchoolYears(savedState.schoolYears);
           setLastSavedWorkspaceState(normalizedSavedState);
           setDatabaseStudentNames(uniqueStudentNames(savedState.rows));
+          setOverviewChangedStudentIds(new Set());
           setLockedOverviewYears(savedState.lockedOverviewYears ?? []);
           setCurrentUserRole(savedState.currentUserRole ?? "Vice Principal");
           if (savedState.userProfile) setUserProfile(savedState.userProfile);
@@ -334,6 +336,7 @@ export default function StudentEvaluationApp() {
         setSchoolYears(dashboardYears);
         setLastSavedWorkspaceState(cleanState);
         setDatabaseStudentNames([]);
+        setOverviewChangedStudentIds(new Set());
         setLockedOverviewYears([]);
         setSaveStatus("saved");
         setSaveMessage("No saved workspace found. Starting with a clean slate.");
@@ -381,6 +384,7 @@ export default function StudentEvaluationApp() {
   function restoreLastSavedWorkspace() {
     if (!lastSavedWorkspaceState) {
       setOverviewDuplicateConflicts([]);
+      setOverviewChangedStudentIds(new Set());
       setSaveStatus("saved");
       setSaveMessage("Discarded unsaved changes.");
       setUnsavedAlertDismissed(false);
@@ -399,6 +403,7 @@ export default function StudentEvaluationApp() {
     setImportLogs(lastSavedWorkspaceState.importLogs ?? []);
     setDatabaseStudentNames(uniqueStudentNames(lastSavedWorkspaceState.rows));
     setOverviewDuplicateConflicts([]);
+    setOverviewChangedStudentIds(new Set());
     setSaveStatus("saved");
     setSaveMessage("Discarded unsaved changes and restored the last saved workspace.");
     setUnsavedAlertDismissed(false);
@@ -430,9 +435,24 @@ export default function StudentEvaluationApp() {
     setSaveStatus("saving");
     setSaveMessage("Saving table changes to Firebase...");
     try {
+      let rowsForSave = orfRows;
+      let placementsForSave = overviewPlacements;
+
       if (activeView === "overview") {
-        const savedState = await loadPrototypeWorkspaceState();
-        const conflicts = findOverviewStudentNameConflicts(activeOverviewRows, selectedOverviewYear, savedState);
+        const savedState = lastSavedWorkspaceState;
+        const rowsForCurrentOverview = overviewRowsForSelection(
+          rowsForSave,
+          placementsForSave,
+          selectedOverviewYear,
+          selectedOverviewGrade
+        );
+        const conflicts = findOverviewStudentNameConflicts(
+          rowsForCurrentOverview,
+          selectedOverviewYear,
+          selectedOverviewGrade,
+          savedState,
+          overviewChangedStudentIds
+        );
 
         if (conflicts.length) {
           setOverviewDuplicateConflicts(conflicts);
@@ -447,11 +467,20 @@ export default function StudentEvaluationApp() {
         }
 
         setOverviewDuplicateConflicts([]);
+
+        const reconciled = reconcilePriorYearStudentPlacements(
+          rowsForSave,
+          placementsForSave,
+          selectedOverviewYear,
+          selectedOverviewGrade
+        );
+        rowsForSave = reconciled.rows;
+        placementsForSave = reconciled.placements;
       }
 
       const workspaceState: SavedWorkspaceState = {
-        rows: orfRows,
-        placements: overviewPlacements,
+        rows: rowsForSave,
+        placements: placementsForSave,
         templates,
         schoolYears,
         lockedOverviewYears,
@@ -462,12 +491,16 @@ export default function StudentEvaluationApp() {
         importLogs
       };
       await savePrototypeWorkspaceState(workspaceState);
-      const result = await saveStudentsToDatabase(orfRows);
+      const rowsToSync = studentRowsChangedSinceLastSave(rowsForSave, lastSavedWorkspaceState);
+      const result = rowsToSync.length ? await saveStudentsToDatabase(rowsToSync) : { createdCount: 0, updatedCount: 0 };
       if (activeView === "profile" && authUser && userProfile.name && userProfile.name !== authUser.displayName) {
         await updateProfile(authUser, { displayName: userProfile.name });
       }
       setLastSavedWorkspaceState(workspaceState);
-      setDatabaseStudentNames(uniqueStudentNames(orfRows));
+      setOrfRows(rowsForSave);
+      setOverviewPlacements(placementsForSave);
+      setDatabaseStudentNames(uniqueStudentNames(rowsForSave));
+      setOverviewChangedStudentIds(new Set());
       setSaveStatus("saved");
       setSaveMessage(
         activeView === "profile"
@@ -702,6 +735,7 @@ export default function StudentEvaluationApp() {
     );
 
     setOrfRows((current) => [...current, ...createdRows]);
+    setOverviewChangedStudentIds((current) => new Set([...current, ...createdRows.map((row) => row.id)]));
     setOverviewPlacements((current) => [
       ...current,
       ...createdRows.map((row) => ({
@@ -736,6 +770,7 @@ export default function StudentEvaluationApp() {
       )
     );
     setOverviewDialog(null);
+    setOverviewChangedStudentIds((current) => new Set([...current, studentId]));
     markUnsaved("Student moved. Save to keep the table changes.");
     recordAudit("Moved student", "Overview placement", student.student, `Moved student to ${trimmedHomeroom}.`);
   }
@@ -753,6 +788,7 @@ export default function StudentEvaluationApp() {
       )
     );
     setOverviewDialog(null);
+    setOverviewChangedStudentIds((current) => new Set([...current, studentId]));
     markUnsaved("Student removed from this homeroom. Save to keep the table changes.");
     if (student) {
       recordAudit(
@@ -893,6 +929,7 @@ export default function StudentEvaluationApp() {
     setAuditEvents(nextAuditEvents);
     setLastSavedWorkspaceState(workspaceState);
     setDatabaseStudentNames(uniqueStudentNames(nextRows));
+    setOverviewChangedStudentIds(new Set());
     setOverviewDuplicateConflicts([]);
     setSaveStatus("saved");
     setSaveMessage(`Import complete. ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} imported and saved to Firebase.`);
@@ -962,6 +999,7 @@ export default function StudentEvaluationApp() {
     setAuditEvents(nextAuditEvents);
     setLastSavedWorkspaceState(workspaceState);
     setDatabaseStudentNames(uniqueStudentNames(nextRows));
+    setOverviewChangedStudentIds(new Set());
     setSaveStatus("saved");
     setSaveMessage(`Reverted import from ${importLog.fileName} and saved the rollback to Firebase.`);
   }
@@ -1186,6 +1224,7 @@ export default function StudentEvaluationApp() {
                 current.map((row) => (row.id === studentId ? { ...row, student: studentName } : row))
               );
               setOverviewDuplicateConflicts((current) => current.filter((conflict) => conflict.studentId !== studentId));
+              setOverviewChangedStudentIds((current) => new Set([...current, studentId]));
               markUnsaved("Student name changed. Save to update Firebase.");
               recordAudit("Edited student name", "Student", studentId, `Changed student display name to ${studentName}.`);
             }}
@@ -5979,11 +6018,89 @@ function normalizeStudentName(name: string) {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+function overviewRowsForSelection(
+  rows: OrfResultRow[],
+  placements: StudentPlacement[],
+  selectedYear: string,
+  selectedGrade: string
+) {
+  return placements
+    .filter((placement) => placement.schoolYear === selectedYear && placement.grade === selectedGrade)
+    .map((placement) => {
+      const row = rows.find((studentRow) => studentRow.id === placement.studentId);
+      return row ? { ...row, homeroom: placement.homeroom } : null;
+    })
+    .filter((row): row is OrfResultRow => Boolean(row));
+}
+
+function reconcilePriorYearStudentPlacements(
+  rows: OrfResultRow[],
+  placements: StudentPlacement[],
+  selectedYear: string,
+  selectedGrade: string
+) {
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  const rowsByName = new Map<string, OrfResultRow[]>();
+  rows.forEach((row) => {
+    const normalizedName = normalizeStudentName(row.student);
+    if (!normalizedName) return;
+    rowsByName.set(normalizedName, [...(rowsByName.get(normalizedName) ?? []), row]);
+  });
+
+  const replacementIds = new Map<string, string>();
+  const mergedRowsById = new Map(rows.map((row) => [row.id, row]));
+
+  placements
+    .filter((placement) => placement.schoolYear === selectedYear && placement.grade === selectedGrade)
+    .forEach((placement) => {
+      const row = rowsById.get(placement.studentId);
+      if (!row) return;
+
+      const matchingRows = rowsByName.get(normalizeStudentName(row.student)) ?? [];
+      const existingPriorRow = matchingRows.find((candidate) => {
+        if (candidate.id === row.id) return false;
+        const alreadyPlacedThisYear = placements.some(
+          (existingPlacement) => existingPlacement.studentId === candidate.id && existingPlacement.schoolYear === selectedYear
+        );
+        return !alreadyPlacedThisYear;
+      });
+      if (!existingPriorRow) return;
+
+      replacementIds.set(row.id, existingPriorRow.id);
+      mergedRowsById.set(existingPriorRow.id, {
+        ...existingPriorRow,
+        student: existingPriorRow.student || row.student,
+        homeroom: placement.homeroom,
+        assessmentValues: {
+          ...(existingPriorRow.assessmentValues ?? {}),
+          ...(row.assessmentValues ?? {})
+        }
+      });
+    });
+
+  if (!replacementIds.size) return { rows, placements };
+
+  const nextPlacements = placements.map((placement) => ({
+    ...placement,
+    studentId: replacementIds.get(placement.studentId) ?? placement.studentId
+  }));
+  const placedStudentIds = new Set(nextPlacements.map((placement) => placement.studentId));
+  const nextRows = Array.from(mergedRowsById.values()).filter((row) => !replacementIds.has(row.id) || placedStudentIds.has(row.id));
+
+  return {
+    rows: nextRows,
+    placements: nextPlacements
+  };
+}
+
 function findOverviewStudentNameConflicts(
   rows: OrfResultRow[],
   selectedYear: string,
-  savedState: WorkspaceStudentSnapshot | null
+  selectedGrade: string,
+  savedState: WorkspaceStudentSnapshot | null,
+  changedStudentIds: Set<string>
 ) {
+  if (!changedStudentIds.size) return [];
   if (!savedState) return [];
 
   const savedRowsById = new Map(savedState.rows.map((row) => [row.id, row]));
@@ -5992,11 +6109,17 @@ function findOverviewStudentNameConflicts(
   const seenConflictKeys = new Set<string>();
 
   rows.forEach((row) => {
+    if (!changedStudentIds.has(row.id)) return;
     const normalizedName = normalizeStudentName(row.student);
     if (!normalizedName) return;
 
     const savedRow = savedRowsById.get(row.id);
-    const savedPlacement = savedPlacementsForYear.find((placement) => placement.studentId === row.id);
+    const savedPlacement = savedPlacementsForYear.find(
+      (placement) =>
+        placement.studentId === row.id &&
+        placement.grade === selectedGrade &&
+        placement.homeroom === row.homeroom
+    );
     const isChangedOrAdded =
       !savedRow || normalizeStudentName(savedRow.student) !== normalizedName || !savedPlacement;
 
@@ -6023,6 +6146,16 @@ function findOverviewStudentNameConflicts(
   });
 
   return conflicts;
+}
+
+function studentRowsChangedSinceLastSave(rows: OrfResultRow[], savedState: WorkspaceStudentSnapshot | null) {
+  if (!savedState) return rows;
+  const savedRowsById = new Map(savedState.rows.map((row) => [row.id, row]));
+
+  return rows.filter((row) => {
+    const savedRow = savedRowsById.get(row.id);
+    return !savedRow || normalizeStudentName(savedRow.student) !== normalizeStudentName(row.student);
+  });
 }
 
 function initialsFor(name: string) {

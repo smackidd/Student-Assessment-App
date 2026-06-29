@@ -177,7 +177,20 @@ export async function saveStudentsToDatabase(rows: OrfResultRow[]) {
         preferredName: null,
         studentNumber: row.id
       })
-    );
+    ).catch((error) => {
+      if (!isAlreadyExistsError(error)) throw error;
+      savedStudentsByNumber.set(row.id, {
+        id: row.id,
+        ...nameParts,
+        preferredName: null,
+        studentNumber: row.id,
+        active: true
+      });
+    });
+    if (savedStudentsByNumber.get(row.id)?.id === row.id) {
+      updatedCount += 1;
+      continue;
+    }
     savedStudentsByNumber.set(row.id, {
       id: row.id,
       ...nameParts,
@@ -192,6 +205,11 @@ export async function saveStudentsToDatabase(rows: OrfResultRow[]) {
     createdCount,
     updatedCount
   };
+}
+
+function isAlreadyExistsError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return message.includes("student_studentNumber_uidx") || message.includes("ALREADY_EXISTS");
 }
 
 async function ensureFirebaseUser() {
