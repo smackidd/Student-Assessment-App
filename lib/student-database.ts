@@ -36,7 +36,7 @@ type PrototypeWorkspaceState = {
   templates: AssessmentTemplate[];
   schoolYears: string[];
   lockedOverviewYears?: string[];
-  currentUserRole?: "Principal" | "Vice Principal" | "Evaluator";
+  currentUserRole?: "Admin" | "Teacher / EA";
   userProfile?: {
     name: string;
     email: string;
@@ -47,9 +47,7 @@ type PrototypeWorkspaceState = {
     id: string;
     name: string;
     email: string;
-    role: "Principal" | "Vice Principal" | "Evaluator";
-    grade: string;
-    homeroom: string;
+    role: "Admin" | "Teacher / EA";
     status: "invited" | "active";
   }>;
   auditEvents?: Array<{

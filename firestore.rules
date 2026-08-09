@@ -1,0 +1,161 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.email is string;
+    }
+
+    function email() {
+      return request.auth.token.email.lower();
+    }
+
+    function isAdmin() {
+      return signedIn() && email() == 'stevemackidd@gmail.com';
+    }
+
+    function canUseRun() {
+      return signedIn();
+    }
+
+    function validMember(userId) {
+      return request.resource.data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'role', 'browser', 'build', 'testDate', 'updatedAt'
+        ])
+        && request.resource.data.uid == userId
+        && request.resource.data.email == email()
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() > 0
+        && request.resource.data.displayName.size() <= 80
+        && request.resource.data.role is string
+        && request.resource.data.role.size() <= 80
+        && request.resource.data.browser is string
+        && request.resource.data.browser.size() <= 160
+        && request.resource.data.build is string
+        && request.resource.data.build.size() <= 200
+        && request.resource.data.testDate is string
+        && request.resource.data.testDate.size() <= 20
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validResponse() {
+      return request.resource.data.keys().hasOnly([
+          'testId', 'testerUid', 'testerName', 'testerEmail', 'status', 'note',
+          'role', 'browser', 'build', 'testDate', 'updatedAt'
+        ])
+        && request.resource.data.testId is string
+        && request.resource.data.testId.size() > 0
+        && request.resource.data.testId.size() <= 120
+        && request.resource.data.testerUid == request.auth.uid
+        && request.resource.data.testerName is string
+        && request.resource.data.testerName.size() > 0
+        && request.resource.data.testerName.size() <= 80
+        && request.resource.data.testerEmail == email()
+        && request.resource.data.status in ['not-tested', 'testing', 'pass', 'issue', 'blocked']
+        && request.resource.data.note is string
+        && request.resource.data.note.size() <= 5000
+        && request.resource.data.role is string
+        && request.resource.data.role.size() <= 80
+        && request.resource.data.browser is string
+        && request.resource.data.browser.size() <= 160
+        && request.resource.data.build is string
+        && request.resource.data.build.size() <= 200
+        && request.resource.data.testDate is string
+        && request.resource.data.testDate.size() <= 20
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validClaim() {
+      return request.resource.data.keys().hasOnly([
+          'testId', 'testerUid', 'testerName', 'expiresAt', 'updatedAt'
+        ])
+        && request.resource.data.testId is string
+        && request.resource.data.testId.size() > 0
+        && request.resource.data.testId.size() <= 120
+        && request.resource.data.testerUid == request.auth.uid
+        && request.resource.data.testerName is string
+        && request.resource.data.testerName.size() > 0
+        && request.resource.data.testerName.size() <= 80
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt > request.time
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function validActivity() {
+      return request.resource.data.keys().hasOnly([
+          'kind', 'testId', 'testerUid', 'testerName', 'status', 'note', 'createdAt'
+        ])
+        && request.resource.data.kind in ['result', 'testing-started', 'testing-stopped']
+        && request.resource.data.testId is string
+        && request.resource.data.testId.size() > 0
+        && request.resource.data.testId.size() <= 120
+        && request.resource.data.testerUid == request.auth.uid
+        && request.resource.data.testerName is string
+        && request.resource.data.testerName.size() > 0
+        && request.resource.data.testerName.size() <= 80
+        && request.resource.data.status in ['not-tested', 'pass', 'issue', 'blocked', 'testing']
+        && request.resource.data.note is string
+        && request.resource.data.note.size() <= 5000
+        && request.resource.data.createdAt == request.time;
+    }
+
+    match /betaRuns/{runId} {
+      allow read: if canUseRun();
+      allow write: if false;
+
+      match /members/{userId} {
+        allow get: if isAdmin()
+          || (signedIn() && userId == request.auth.uid)
+          || canUseRun();
+        allow list: if canUseRun();
+        allow create: if signedIn()
+          && userId == request.auth.uid
+          && validMember(userId);
+        allow update: if (
+            isAdmin()
+            || (signedIn() && userId == request.auth.uid && resource.data.uid == request.auth.uid)
+          ) && validMember(userId);
+        allow delete: if isAdmin()
+          || (signedIn() && userId == request.auth.uid && resource.data.uid == request.auth.uid);
+      }
+
+      match /responses/{responseId} {
+        allow read: if canUseRun();
+        allow create: if canUseRun() && validResponse();
+        allow update: if canUseRun()
+          && resource.data.testerUid == request.auth.uid
+          && validResponse();
+        allow delete: if isAdmin()
+          || (canUseRun() && resource.data.testerUid == request.auth.uid);
+      }
+
+      match /testingClaims/{claimId} {
+        allow read: if canUseRun();
+        allow create: if canUseRun() && validClaim();
+        allow update: if canUseRun()
+          && resource.data.testerUid == request.auth.uid
+          && validClaim();
+        allow delete: if isAdmin()
+          || (canUseRun() && resource.data.testerUid == request.auth.uid);
+      }
+
+      match /activity/{eventId} {
+        allow read: if canUseRun();
+        allow create: if canUseRun() && validActivity();
+        allow update, delete: if false;
+      }
+    }
+
+    match /organizations/{orgId}/revocations/{userId} {
+      allow get: if signedIn()
+        && request.auth.uid == userId
+        && request.auth.token.organizationId == orgId;
+      allow list, create, update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

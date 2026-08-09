@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "default": "student-assessment-2d869"
+  },
+  "targets": {},
+  "etags": {
+    "student-assessment-2d869": {
+      "extensionInstances": {
+        "firestore-send-email": "4df577a9321fbd617f7f38d1363a3c24c8e201c6063b25b037970b97e06fe4cf"
+      }
+    }
+  }
+}

@@ -372,6 +372,11 @@ textarea {
   text-decoration: underline;
 }
 
+.auth-switch:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
 .user-menu {
   display: flex;
   align-items: center;
@@ -1994,6 +1999,11 @@ textarea {
   font-weight: 900;
 }
 
+.danger-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .empty-state {
   color: var(--muted);
 }
@@ -2171,6 +2181,32 @@ textarea {
   margin-top: 0;
 }
 
+.profile-role {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.profile-role span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.invite-explainer,
+.team-message {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
 .password-form {
   align-items: end;
 }
@@ -2199,13 +2235,26 @@ textarea {
 }
 
 .team-row {
-  grid-template-columns: auto minmax(0, 1fr) 220px;
+  grid-template-columns: auto minmax(0, 1fr) 220px auto;
+  align-items: center;
+}
+
+.team-table {
+  max-height: min(55vh, 560px);
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .team-row p {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.team-delete-action {
+  min-height: 42px;
 }
 
 @media (max-width: 1100px) {
@@ -2290,7 +2339,8 @@ textarea {
 
   .options-grid,
   .audit-controls,
-  .audit-table-row {
+  .audit-table-row,
+  .team-row {
     grid-template-columns: 1fr;
   }
 

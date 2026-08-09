@@ -24,11 +24,11 @@ import {
 } from "recharts";
 import * as XLSX from "xlsx-js-style";
 import {
-  createUserWithEmailAndPassword,
   EmailAuthProvider,
   getAuth,
   onAuthStateChanged,
   reauthenticateWithCredential,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signOut,
   updatePassword,
@@ -68,12 +68,23 @@ import {
 } from "@/lib/student-database";
 import { firebaseApp } from "@/lib/firebase";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
+import {
+  deleteOrganizationMember,
+  inviteOrganizationMember,
+  listOrganizationMembers,
+  resolveOrganizationAccess,
+  roles,
+  updateOrganizationMemberRole,
+  watchOrganizationAccessRevocation,
+  type OrganizationAccess,
+  type TeamMember,
+  type UserRole
+} from "@/lib/organization-auth";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 const dataTypes: AssessmentDataType[] = ["integer", "percentage", "letter", "text", "date", "file", "calculated"];
 const dashboardYears = ["2026-2027", "2025-2026", "2024-2025"];
-const roles = ["Principal", "Vice Principal", "Evaluator"] as const;
 const predefinedCalculations = [
   {
     key: "median",
@@ -114,7 +125,6 @@ const pastelRoundColors = [
 
 type AppView = "overview" | "dashboard" | "assessment" | "report" | "files" | "profile";
 type AssessmentPageTab = "builder" | "entry";
-type UserRole = (typeof roles)[number];
 type ProfilePageTab = "profile" | "password" | "audit" | "team";
 type StudentNotePermission = "admin_only" | "all";
 type SaveStatus = "saved" | "dirty" | "saving" | "error";
@@ -146,11 +156,11 @@ export default function StudentEvaluationApp() {
   const [activeView, setActiveView] = useState<AppView>("overview");
   const [assessmentPageTab, setAssessmentPageTab] = useState<AssessmentPageTab>("entry");
   const [profilePageTab, setProfilePageTab] = useState<ProfilePageTab>("profile");
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole>("Vice Principal");
+  const [currentUserRole, setCurrentUserRole] = useState<UserRole>("Teacher / EA");
   const [userProfile, setUserProfile] = useState({ name: "", email: "", grade: "3", homeroom: "3A" });
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
-  const [organizationAccess, setOrganizationAccess] = useState<"checking" | "active" | "uninvited">("checking");
+  const [organizationAccess, setOrganizationAccess] = useState<OrganizationAccess>("checking");
   const [orfRows, setOrfRows] = useState<OrfResultRow[]>([]);
   const [schoolYears, setSchoolYears] = useState(dashboardYears);
   const [selectedOverviewYear, setSelectedOverviewYear] = useState(dashboardYears[0]);
@@ -203,7 +213,7 @@ export default function StudentEvaluationApp() {
       studentId: "student-d",
       permission: "all",
       body: "Retest after additional reading practice block.",
-      author: "Evaluator",
+      author: "Teacher / EA",
       createdAt: "2026-06-09"
     }
   ]);
@@ -221,7 +231,7 @@ export default function StudentEvaluationApp() {
     () => templates.find((template) => template.id === selectedId) ?? templates[0],
     [selectedId, templates]
   );
-  const isAdmin = currentUserRole === "Principal" || currentUserRole === "Vice Principal";
+  const isAdmin = currentUserRole === "Admin";
   const activeNoteStudent = activeNoteStudentId
     ? orfRows.find((row) => row.id === activeNoteStudentId) ?? null
     : null;
@@ -252,38 +262,77 @@ export default function StudentEvaluationApp() {
 
   useEffect(() => {
     const auth = getAuth(firebaseApp);
-    return onAuthStateChanged(auth, (user) => {
+    return onAuthStateChanged(auth, async (user) => {
+      setAuthReady(false);
       setAuthUser(user);
-      if (user) {
-        const fallbackName = user.displayName || user.email?.split("@")[0] || "Team Member";
-        setUserProfile((profile) => ({
-          ...profile,
-          name: profile.name || fallbackName,
-          email: profile.email || user.email || ""
-        }));
-        setTeamMembers((current) =>
-          current.length
-            ? current
-            : [
+      setOrganizationAccess("checking");
+
+      if (!user) {
+        setTeamMembers([]);
+        setOrganizationAccess("uninvited");
+        setAuthReady(true);
+        return;
+      }
+
+      const fallbackName = user.displayName || user.email?.split("@")[0] || "Team Member";
+      setUserProfile((profile) => ({
+        ...profile,
+        name: profile.name || fallbackName,
+        email: profile.email || user.email || ""
+      }));
+
+      try {
+        const membership = await resolveOrganizationAccess(user);
+        setOrganizationAccess(membership.access);
+        if (membership.role) {
+          setCurrentUserRole(membership.role);
+          if (membership.role === "Admin") {
+            try {
+              setTeamMembers(await listOrganizationMembers());
+            } catch {
+              setTeamMembers([
                 {
                   id: user.uid,
                   name: fallbackName,
                   email: user.email || "",
-                  role: "Vice Principal",
-                  grade: "3",
-                  homeroom: "3A",
+                  role: membership.role,
                   status: "active"
                 }
-              ]
-        );
+              ]);
+            }
+          } else {
+            setTeamMembers([
+              {
+                id: user.uid,
+                name: fallbackName,
+                email: user.email || "",
+                role: membership.role,
+                status: "active"
+              }
+            ]);
+          }
+        }
+      } catch (error) {
+        if (isRemovedAuthSession(error)) {
+          await signOut(auth);
+        } else {
+          setOrganizationAccess("uninvited");
+        }
+      } finally {
+        setAuthReady(true);
       }
-      setAuthReady(true);
     });
   }, []);
 
   useEffect(() => {
-    if (!authReady || !authUser) return;
-    const signedInUser = authUser;
+    if (!authUser || organizationAccess !== "active") return;
+    return watchOrganizationAccessRevocation(authUser.uid, () => {
+      void signOut(getAuth(firebaseApp));
+    });
+  }, [authUser, organizationAccess]);
+
+  useEffect(() => {
+    if (!authReady || !authUser || organizationAccess !== "active") return;
     let cancelled = false;
 
     async function loadSavedStudents() {
@@ -301,18 +350,9 @@ export default function StudentEvaluationApp() {
           setDatabaseStudentNames(uniqueStudentNames(savedState.rows));
           setOverviewChangedStudentIds(new Set());
           setLockedOverviewYears(savedState.lockedOverviewYears ?? []);
-          setCurrentUserRole(savedState.currentUserRole ?? "Vice Principal");
           if (savedState.userProfile) setUserProfile(savedState.userProfile);
           if (savedState.auditEvents) setAuditEvents(savedState.auditEvents);
           setImportLogs(savedState.importLogs ?? []);
-          if (savedState.teamMembers) {
-            const activatedTeam = activateSignedInMember(savedState.teamMembers, signedInUser);
-            setTeamMembers(activatedTeam.members);
-            setOrganizationAccess(activatedTeam.access);
-            if (activatedTeam.role) setCurrentUserRole(activatedTeam.role);
-          } else {
-            setOrganizationAccess("active");
-          }
           setSaveStatus("saved");
           setSaveMessage("Loaded the saved table workspace from Firebase.");
           return;
@@ -324,9 +364,7 @@ export default function StudentEvaluationApp() {
           templates: assessmentTemplates,
           schoolYears: dashboardYears,
           lockedOverviewYears: [],
-          currentUserRole,
           userProfile,
-          teamMembers,
           auditEvents,
           importLogs: []
         };
@@ -340,7 +378,6 @@ export default function StudentEvaluationApp() {
         setLockedOverviewYears([]);
         setSaveStatus("saved");
         setSaveMessage("No saved workspace found. Starting with a clean slate.");
-        setOrganizationAccess("active");
       } catch (error) {
         if (cancelled) return;
         setSaveStatus("error");
@@ -352,7 +389,7 @@ export default function StudentEvaluationApp() {
     return () => {
       cancelled = true;
     };
-  }, [authReady, authUser]);
+  }, [authReady, authUser, organizationAccess]);
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
@@ -396,9 +433,7 @@ export default function StudentEvaluationApp() {
     setTemplates(lastSavedWorkspaceState.templates);
     setSchoolYears(lastSavedWorkspaceState.schoolYears);
     setLockedOverviewYears(lastSavedWorkspaceState.lockedOverviewYears ?? []);
-    setCurrentUserRole(lastSavedWorkspaceState.currentUserRole ?? "Vice Principal");
     if (lastSavedWorkspaceState.userProfile) setUserProfile(lastSavedWorkspaceState.userProfile);
-    if (lastSavedWorkspaceState.teamMembers) setTeamMembers(lastSavedWorkspaceState.teamMembers);
     if (lastSavedWorkspaceState.auditEvents) setAuditEvents(lastSavedWorkspaceState.auditEvents);
     setImportLogs(lastSavedWorkspaceState.importLogs ?? []);
     setDatabaseStudentNames(uniqueStudentNames(lastSavedWorkspaceState.rows));
@@ -429,6 +464,24 @@ export default function StudentEvaluationApp() {
     if (!confirmUnsavedChanges()) return;
     setTableFullScreen(false);
     setAssessmentPageTab(tab);
+  }
+
+  async function changeTeamMemberRole(memberId: string, role: UserRole) {
+    const updatedMember = await updateOrganizationMemberRole(memberId, role);
+    setTeamMembers((current) =>
+      current.map((member) => (member.id === updatedMember.id ? updatedMember : member))
+    );
+    recordAudit("Changed team role", "Team", updatedMember.email, `Assigned ${updatedMember.role}.`);
+  }
+
+  async function deleteTeamMember(memberId: string) {
+    const member = teamMembers.find((item) => item.id === memberId);
+    const deletedUid = await deleteOrganizationMember(memberId);
+    setTeamMembers((current) => current.filter((item) => item.id !== deletedUid));
+    recordAudit("Deleted team member", "Team", member?.email ?? memberId, "Removed application access.");
+    if (authUser?.uid === deletedUid) {
+      await signOut(getAuth(firebaseApp));
+    }
   }
 
   async function saveTablesToFirebase() {
@@ -484,9 +537,7 @@ export default function StudentEvaluationApp() {
         templates,
         schoolYears,
         lockedOverviewYears,
-        currentUserRole,
         userProfile,
-        teamMembers,
         auditEvents,
         importLogs
       };
@@ -676,7 +727,7 @@ export default function StudentEvaluationApp() {
         studentId,
         permission,
         body: trimmed,
-        author: permission === "admin_only" ? "Admin" : "Evaluator",
+        author: permission === "admin_only" ? "Admin" : "Teacher / EA",
         createdAt: new Date().toISOString().slice(0, 10)
       },
       ...current
@@ -906,9 +957,7 @@ export default function StudentEvaluationApp() {
       templates,
       schoolYears: nextYears,
       lockedOverviewYears,
-      currentUserRole,
       userProfile,
-      teamMembers,
       auditEvents: nextAuditEvents,
       importLogs: nextImportLogs
     };
@@ -984,9 +1033,7 @@ export default function StudentEvaluationApp() {
       templates,
       schoolYears,
       lockedOverviewYears,
-      currentUserRole,
       userProfile,
-      teamMembers,
       auditEvents: nextAuditEvents,
       importLogs: nextImportLogs
     };
@@ -1267,9 +1314,9 @@ export default function StudentEvaluationApp() {
             profile={userProfile}
             setProfile={setUserProfile}
             currentRole={currentUserRole}
-            setCurrentRole={setCurrentUserRole}
             teamMembers={teamMembers}
-            setTeamMembers={setTeamMembers}
+            onRoleChange={changeTeamMemberRole}
+            onDeleteMember={deleteTeamMember}
             events={auditEvents}
             importLogs={importLogs}
             onRevertImport={revertImport}
@@ -1335,21 +1382,13 @@ export default function StudentEvaluationApp() {
       {inviteDialogOpen ? (
         <InviteModal
           onClose={() => setInviteDialogOpen(false)}
-          onInvite={(emails) => {
+          onInvite={async (invite) => {
+            const member = await inviteOrganizationMember(invite);
             setTeamMembers((current) => [
-              ...current,
-              ...emails.map((email) => ({
-                id: `invite-${Date.now()}-${email}`,
-                name: email.split("@")[0],
-                email,
-                role: "Evaluator" as const,
-                grade: "",
-                homeroom: "",
-                status: "invited" as const
-              }))
-            ]);
-            markUnsaved("Team invites changed. Save to update Firebase.");
-            recordAudit("Invited team members", "Team", "Invite list", `Queued ${emails.length} invite${emails.length === 1 ? "" : "s"}.`);
+              ...current.filter((item) => item.id !== member.id),
+              member
+            ].sort((first, second) => first.name.localeCompare(second.name)));
+            recordAudit("Invited team member", "Team", member.email, `Invited as ${member.role}.`);
             setInviteDialogOpen(false);
           }}
         />
@@ -1427,26 +1466,14 @@ type SavedWorkspaceState = WorkspaceStudentSnapshot & {
   templates: AssessmentTemplate[];
   schoolYears: string[];
   lockedOverviewYears?: string[];
-  currentUserRole?: UserRole;
   userProfile?: {
     name: string;
     email: string;
     grade: string;
     homeroom: string;
   };
-  teamMembers?: TeamMember[];
   auditEvents?: AppAuditEvent[];
   importLogs?: ImportChangeLog[];
-};
-
-type TeamMember = {
-  id: string;
-  name: string;
-  email: string;
-  role: UserRole;
-  grade: string;
-  homeroom: string;
-  status: "invited" | "active";
 };
 
 type UploadedReport = {
@@ -1472,32 +1499,45 @@ type AppAuditEvent = {
 };
 
 function AuthScreen() {
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [displayName, setDisplayName] = useState("");
   const [authMessage, setAuthMessage] = useState("");
-  const [submitting, setSubmitting] = useState(false);
+  const [action, setAction] = useState<"signin" | "reset" | null>(null);
 
   async function submitAuth(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setSubmitting(true);
+    setAction("signin");
     setAuthMessage("");
 
     try {
-      const auth = getAuth(firebaseApp);
-      if (mode === "signin") {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
-      } else {
-        const credential = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        if (displayName.trim()) {
-          await updateProfile(credential.user, { displayName: displayName.trim() });
-        }
-      }
+      await signInWithEmailAndPassword(getAuth(firebaseApp), email.trim(), password);
     } catch (error) {
       setAuthMessage(friendlyAuthError(error));
     } finally {
-      setSubmitting(false);
+      setAction(null);
+    }
+  }
+
+  async function resetPassword() {
+    if (!email.trim()) {
+      setAuthMessage("Enter your invited email address first.");
+      return;
+    }
+
+    setAction("reset");
+    setAuthMessage("");
+    try {
+      await sendPasswordResetEmail(getAuth(firebaseApp), email.trim());
+      setAuthMessage("If that invited account exists, Firebase has sent a password reset email.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      setAuthMessage(
+        message.includes("auth/operation-not-allowed")
+          ? "Email/password sign-in is not enabled in Firebase yet."
+          : "If that invited account exists, Firebase has sent a password reset email."
+      );
+    } finally {
+      setAction(null);
     }
   }
 
@@ -1506,23 +1546,11 @@ function AuthScreen() {
       <section className="auth-card panel">
         <div>
           <p className="eyebrow">Student Evaluations</p>
-          <h1>{mode === "signin" ? "Sign in" : "Create account"}</h1>
-          <p>Use your school workspace account to open the assessment tables and save changes to Firebase.</p>
+          <h1>Sign in</h1>
+          <p>Accounts are created by an administrator. Use the email address from your invitation.</p>
         </div>
 
         <form className="auth-form" onSubmit={submitAuth}>
-          {mode === "signup" ? (
-            <label>
-              Name
-              <input
-                autoComplete="name"
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="Example: Lindsey Bingley"
-              />
-            </label>
-          ) : null}
-
           <label>
             Email
             <input
@@ -1538,7 +1566,7 @@ function AuthScreen() {
           <label>
             Password
             <input
-              autoComplete={mode === "signin" ? "current-password" : "new-password"}
+              autoComplete="current-password"
               minLength={6}
               required
               type="password"
@@ -1550,20 +1578,18 @@ function AuthScreen() {
 
           {authMessage ? <div className="auth-message">{authMessage}</div> : null}
 
-          <button className="primary-action" disabled={submitting} type="submit">
-            {submitting ? "Working..." : mode === "signin" ? "Sign in" : "Sign up"}
+          <button className="primary-action" disabled={action !== null} type="submit">
+            {action === "signin" ? "Signing in..." : "Sign in"}
           </button>
         </form>
 
         <button
           className="auth-switch"
-          onClick={() => {
-            setMode(mode === "signin" ? "signup" : "signin");
-            setAuthMessage("");
-          }}
+          disabled={action !== null}
+          onClick={resetPassword}
           type="button"
         >
-          {mode === "signin" ? "Need an account? Sign up" : "Already have an account? Sign in"}
+          {action === "reset" ? "Sending reset email..." : "Forgot password?"}
         </button>
       </section>
     </main>
@@ -1576,9 +1602,9 @@ function PendingInviteScreen({ email, onSignOut }: { email: string; onSignOut: (
       <section className="auth-card unauthorized-card panel">
         <span className="avatar-circle unauthorized-avatar">{initialsFor(email || "User")}</span>
         <p className="eyebrow">Organization Access</p>
-        <h1>Unauthorized</h1>
+        <h1>Invitation required</h1>
         <p>
-          You will be authorized when an admin has invited you to their organization.
+          This account is not a member of the organization. An Admin can invite you and assign your access.
         </p>
         <p className="pending-email">{email}</p>
         <button className="primary-action" onClick={onSignOut} type="button">
@@ -1589,30 +1615,6 @@ function PendingInviteScreen({ email, onSignOut }: { email: string; onSignOut: (
   );
 }
 
-function activateSignedInMember(members: TeamMember[], user: User) {
-  const email = user.email?.toLowerCase() ?? "";
-  if (!email) return { members, access: "uninvited" as const, role: null };
-  if (!members.length) return { members, access: "active" as const, role: "Vice Principal" as UserRole };
-
-  const matchingMember = members.find((member) => member.email.toLowerCase() === email);
-  if (!matchingMember) return { members, access: "uninvited" as const, role: null };
-
-  return {
-    members: members.map((member) =>
-      member.id === matchingMember.id
-        ? {
-            ...member,
-            id: user.uid,
-            name: member.name || user.displayName || email.split("@")[0],
-            status: "active" as const
-          }
-        : member
-    ),
-    access: "active" as const,
-    role: matchingMember.role
-  };
-}
-
 function friendlyAuthError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   if (message.includes("auth/invalid-credential")) return "That email and password did not match an account.";
@@ -1620,6 +1622,28 @@ function friendlyAuthError(error: unknown) {
   if (message.includes("auth/weak-password")) return "Use a password with at least 6 characters.";
   if (message.includes("auth/operation-not-allowed")) return "Email/password sign-in is not enabled in Firebase yet.";
   return message || "Something went wrong with sign-in.";
+}
+
+function isRemovedAuthSession(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  return [
+    "auth/user-not-found",
+    "auth/user-disabled",
+    "auth/user-token-expired",
+    "auth/invalid-user-token"
+  ].some((code) => message.includes(code));
+}
+
+function friendlyCallableError(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("permission-denied")) return "Only an Admin can manage organization users.";
+  if (message.includes("already-exists")) return "That email already belongs to this organization.";
+  if (message.includes("last Admin")) return "The last Admin cannot be deleted. Assign another Admin first.";
+  if (message.includes("not-found")) return "That user is no longer part of this organization.";
+  if (message.includes("unavailable")) {
+    return "The organization service is temporarily unavailable. Try again.";
+  }
+  return message.replace(/^Firebase:\s*/i, "") || "The request could not be completed.";
 }
 
 function friendlyPasswordError(error: unknown) {
@@ -2385,7 +2409,7 @@ function InlineEntryTable({
     <section className={fullScreen ? "panel entry-panel table-card-fullscreen" : "panel entry-panel"}>
       <div className="entry-heading">
         <div className="entry-title-block">
-          <p className="eyebrow">Evaluator Entry</p>
+          <p className="eyebrow">Assessment Entry</p>
           <h2>{selected.name}</h2>
         </div>
 
@@ -3259,9 +3283,9 @@ function ProfilePage({
   profile,
   setProfile,
   currentRole,
-  setCurrentRole,
   teamMembers,
-  setTeamMembers,
+  onRoleChange,
+  onDeleteMember,
   events,
   importLogs,
   onRevertImport,
@@ -3278,9 +3302,9 @@ function ProfilePage({
   profile: { name: string; email: string; grade: string; homeroom: string };
   setProfile: React.Dispatch<React.SetStateAction<{ name: string; email: string; grade: string; homeroom: string }>>;
   currentRole: UserRole;
-  setCurrentRole: React.Dispatch<React.SetStateAction<UserRole>>;
   teamMembers: TeamMember[];
-  setTeamMembers: React.Dispatch<React.SetStateAction<TeamMember[]>>;
+  onRoleChange: (memberId: string, role: UserRole) => Promise<void>;
+  onDeleteMember: (memberId: string) => Promise<void>;
   events: AppAuditEvent[];
   importLogs: ImportChangeLog[];
   onRevertImport: (importLogId: string) => Promise<void>;
@@ -3297,17 +3321,42 @@ function ProfilePage({
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordStatus, setPasswordStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
   const [passwordMessage, setPasswordMessage] = useState("Use your current password to set a new one.");
+  const [roleUpdatingId, setRoleUpdatingId] = useState<string | null>(null);
+  const [memberDeletingId, setMemberDeletingId] = useState<string | null>(null);
+  const [memberPendingDelete, setMemberPendingDelete] = useState<TeamMember | null>(null);
+  const [teamMessage, setTeamMessage] = useState("");
+  const adminCount = teamMembers.filter((member) => member.role === "Admin").length;
 
   function updateProfileField(field: keyof typeof profile, value: string) {
     setProfile((current) => ({ ...current, [field]: value }));
     markUnsaved("Profile changed. Save to update Firebase.");
   }
 
-  function updateTeamRole(memberId: string, role: UserRole) {
-    setTeamMembers((current) => current.map((member) => (member.id === memberId ? { ...member, role } : member)));
-    markUnsaved("Team role changed. Save to update Firebase.");
-    const member = teamMembers.find((item) => item.id === memberId);
-    if (member?.email === profile.email) setCurrentRole(role);
+  async function updateTeamRole(memberId: string, role: UserRole) {
+    setRoleUpdatingId(memberId);
+    setTeamMessage("");
+    try {
+      await onRoleChange(memberId, role);
+      setTeamMessage("Role updated.");
+    } catch (error) {
+      setTeamMessage(friendlyCallableError(error));
+    } finally {
+      setRoleUpdatingId(null);
+    }
+  }
+
+  async function deleteTeamUser(member: TeamMember) {
+    setMemberDeletingId(member.id);
+    setTeamMessage("");
+    try {
+      await onDeleteMember(member.id);
+      setMemberPendingDelete(null);
+      setTeamMessage(`${member.name || member.email} was deleted.`);
+    } catch (error) {
+      setTeamMessage(friendlyCallableError(error));
+    } finally {
+      setMemberDeletingId(null);
+    }
   }
 
   async function changePassword() {
@@ -3396,24 +3445,10 @@ function ProfilePage({
             Home room
             <input value={profile.homeroom} onChange={(event) => updateProfileField("homeroom", event.target.value)} />
           </label>
-          {isAdmin ? (
-            <label>
-              Current role
-              <select
-                value={currentRole}
-                onChange={(event) => {
-                  setCurrentRole(event.target.value as UserRole);
-                  markUnsaved("Role changed. Save to update Firebase.");
-                }}
-              >
-                {roles.map((role) => (
-                  <option key={role} value={role}>
-                    {role}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
+          <div className="profile-role">
+            <span>Role</span>
+            <strong>{currentRole}</strong>
+          </div>
         </div>
       ) : null}
 
@@ -3481,42 +3516,109 @@ function ProfilePage({
                   <strong>{member.name}</strong>
                   <p>{member.email} / {member.status}</p>
                 </div>
-                <select value={member.role} onChange={(event) => updateTeamRole(member.id, event.target.value as UserRole)}>
+                <select
+                  aria-label={`Role for ${member.name}`}
+                  disabled={member.id === authUser?.uid || roleUpdatingId === member.id || memberDeletingId === member.id}
+                  value={member.role}
+                  onChange={(event) => updateTeamRole(member.id, event.target.value as UserRole)}
+                >
                   {roles.map((role) => (
                     <option key={role} value={role}>
                       {role}
                     </option>
                   ))}
                 </select>
+                {member.role !== "Admin" || adminCount > 1 ? (
+                  <button
+                    className="danger-action team-delete-action"
+                    disabled={memberDeletingId !== null || roleUpdatingId === member.id}
+                    onClick={() => setMemberPendingDelete(member)}
+                    type="button"
+                  >
+                    Delete
+                  </button>
+                ) : null}
               </div>
             ))}
           </div>
+          {teamMessage ? <p className="team-message">{teamMessage}</p> : null}
         </div>
+      ) : null}
+
+      {memberPendingDelete ? (
+        <DeleteTeamMemberModal
+          deleting={memberDeletingId === memberPendingDelete.id}
+          member={memberPendingDelete}
+          onClose={() => setMemberPendingDelete(null)}
+          onDelete={() => deleteTeamUser(memberPendingDelete)}
+        />
       ) : null}
     </section>
   );
 }
 
-function InviteModal({ onClose, onInvite }: { onClose: () => void; onInvite: (emails: string[]) => void }) {
-  const [emails, setEmails] = useState([""]);
-  const cleanEmails = emails.map((email) => email.trim()).filter(Boolean);
-  const inviteSubject = "You're invited to Student Evaluations";
-  const inviteBody = [
-    "Hello,",
-    "",
-    "You have been invited to the Student Evaluations app.",
-    "",
-    "Please navigate to http://localhost:3020 and create an account using this invited email address.",
-    "",
-    "After your account is created, your organization access and assigned role will be activated automatically.",
-    "",
-    "Thank you."
-  ].join("\n");
+function DeleteTeamMemberModal({
+  deleting,
+  member,
+  onClose,
+  onDelete
+}: {
+  deleting: boolean;
+  member: TeamMember;
+  onClose: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Delete organization user">
+      <section className="notes-modal panel">
+        <div className="modal-top">
+          <div>
+            <p className="eyebrow">Are you sure?</p>
+            <h2>Delete {member.name || member.email}?</h2>
+          </div>
+        </div>
 
-  function sendInvites() {
-    const mailto = `mailto:${cleanEmails.join(",")}?subject=${encodeURIComponent(inviteSubject)}&body=${encodeURIComponent(inviteBody)}`;
-    window.location.href = mailto;
-    onInvite(cleanEmails);
+        <p>
+          This permanently removes this user&apos;s sign-in access and signs them out of any open app session.
+          Student and assessment records are not deleted.
+        </p>
+
+        <div className="modal-actions">
+          <button className="small-action ghost" disabled={deleting} onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="danger-action" disabled={deleting} onClick={onDelete} type="button">
+            {deleting ? "Deleting..." : "Delete user"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function InviteModal({
+  onClose,
+  onInvite
+}: {
+  onClose: () => void;
+  onInvite: (invite: { email: string; name: string; role: UserRole }) => Promise<void>;
+}) {
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState<UserRole>("Teacher / EA");
+  const [status, setStatus] = useState<"idle" | "sending" | "error">("idle");
+  const [message, setMessage] = useState("");
+  const inviteReady = Boolean(email.trim() && name.trim());
+
+  async function sendInvite() {
+    setStatus("sending");
+    setMessage("");
+    try {
+      await onInvite({ email, name, role });
+    } catch (error) {
+      setStatus("error");
+      setMessage(friendlyCallableError(error));
+    }
   }
 
   return (
@@ -3525,34 +3627,55 @@ function InviteModal({ onClose, onInvite }: { onClose: () => void; onInvite: (em
         <div className="modal-top">
           <div>
             <p className="eyebrow">Team</p>
-            <h2>Invite users</h2>
+            <h2>Invite a user</h2>
           </div>
-          <button className="small-action ghost" onClick={onClose} type="button">
+          <button className="small-action ghost" disabled={status === "sending"} onClick={onClose} type="button">
             Close
           </button>
         </div>
         <div className="invite-fields">
-          {emails.map((email, index) => (
-            <label key={index}>
-              Email
-              <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmails((current) => current.map((item, itemIndex) => (itemIndex === index ? event.target.value : item)))}
-              />
-            </label>
-          ))}
+          <label>
+            Name
+            <input
+              autoComplete="name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Example: Lindsey Bingley"
+            />
+          </label>
+          <label>
+            Email
+            <input
+              autoComplete="email"
+              type="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              placeholder="name@school.ca"
+            />
+          </label>
+          <label>
+            Role
+            <select value={role} onChange={(event) => setRole(event.target.value as UserRole)}>
+              {roles.map((roleOption) => (
+                <option key={roleOption} value={roleOption}>
+                  {roleOption}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        <div className="invite-template">
-          <p className="eyebrow">Email Template</p>
-          <pre>{inviteBody}</pre>
-        </div>
+        <p className="invite-explainer">
+          Firebase will email a single-use link so this user can set their own password. No temporary password is sent.
+        </p>
+        {message ? <div className="auth-message">{message}</div> : null}
         <div className="modal-actions">
-          <button className="small-action ghost" onClick={() => setEmails((current) => [...current, ""])} type="button">
-            Add Another Email
-          </button>
-          <button className="primary-action" disabled={!cleanEmails.length} onClick={sendInvites} type="button">
-            Invite
+          <button
+            className="primary-action"
+            disabled={!inviteReady || status === "sending"}
+            onClick={sendInvite}
+            type="button"
+          >
+            {status === "sending" ? "Sending invitation..." : "Send invitation"}
           </button>
         </div>
       </section>

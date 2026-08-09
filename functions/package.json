@@ -1,0 +1,19 @@
+{
+  "name": "student-evaluation-auth-functions",
+  "private": true,
+  "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "firebase-admin": "13.10.0",
+    "firebase-functions": "7.2.1"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

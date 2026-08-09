@@ -31,11 +31,13 @@ pnpm-debug.log*
 .env.development
 .env.test
 .env.production
+/extensions/*.env
 
 # keep example env files in git
 !.env.example
 !.env.local.example
 !.env.production.example
+!/extensions/*.env.example
 
 # Vercel
 .vercel/
