@@ -1,6 +1,12 @@
 export type AssessmentDataType = "integer" | "percentage" | "letter" | "text" | "date" | "file" | "calculated";
 export type Visibility = "evaluators" | "vice-principal" | "admin";
 
+export type AssessmentFieldValidationConfig = {
+  min?: number;
+  max?: number;
+  precision?: number;
+};
+
 export type AssessmentFieldTemplate = {
   id: string;
   name: string;
@@ -15,6 +21,7 @@ export type AssessmentFieldTemplate = {
   calculationExpression?: string;
   calculationCondition?: unknown;
   letterRanks?: string;
+  validationConfig?: AssessmentFieldValidationConfig;
   visibility: Visibility;
 };
 

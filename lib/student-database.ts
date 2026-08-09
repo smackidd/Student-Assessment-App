@@ -2,16 +2,17 @@ import { executeMutation, executeQuery, getDataConnect, mutationRef, queryRef } 
 import { getAuth } from "firebase/auth";
 import { dataConnectConfig, firebaseApp } from "@/lib/firebase";
 import type { AssessmentTemplate } from "@/lib/assessment-templates";
+import type { OrganizationAuditEvent } from "@/lib/audit-events";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
+import {
+  buildStudentSavePlan,
+  displayNameFor,
+  runInBatches,
+  type PersistedStudent,
+  type StudentSaveAction
+} from "@/lib/student-save-planner";
 
-type SavedStudent = {
-  id: string;
-  firstName: string;
-  lastName: string;
-  preferredName?: string | null;
-  studentNumber?: string | null;
-  active: boolean;
-};
+type SavedStudent = PersistedStudent;
 
 type ListStudentsResult = {
   students: SavedStudent[];
@@ -36,6 +37,7 @@ type PrototypeWorkspaceState = {
   templates: AssessmentTemplate[];
   schoolYears: string[];
   lockedOverviewYears?: string[];
+  pendingStudentSync?: boolean;
   currentUserRole?: "Admin" | "Teacher / EA";
   userProfile?: {
     name: string;
@@ -50,17 +52,7 @@ type PrototypeWorkspaceState = {
     role: "Admin" | "Teacher / EA";
     status: "invited" | "active";
   }>;
-  auditEvents?: Array<{
-    id: string;
-    eventType: string;
-    entityType: string;
-    entityLabel: string;
-    description: string;
-    createdAt: string;
-    actor: string;
-    importLogId?: string;
-    revertedAt?: string;
-  }>;
+  auditEvents?: OrganizationAuditEvent[];
   importLogs?: Array<{
     id: string;
     fileName: string;
@@ -71,6 +63,7 @@ type PrototypeWorkspaceState = {
     dataCellCount: number;
     duplicateNames: string[];
     addedStudentIds: string[];
+    addedRows?: OrfResultRow[];
     addedPlacements: Array<{
       studentId: string;
       schoolYear: string;
@@ -103,6 +96,7 @@ type SavePrototypeWorkspaceStateResult = {
 };
 
 const dataConnect = getDataConnect(firebaseApp, dataConnectConfig);
+const STUDENT_WRITE_BATCH_SIZE = 8;
 
 export async function loadPrototypeWorkspaceState(id = "main") {
   await ensureFirebaseUser();
@@ -141,68 +135,57 @@ export async function loadStudentsFromDatabase() {
 }
 
 export async function saveStudentsToDatabase(rows: OrfResultRow[]) {
+  const startedAt = Date.now();
   await ensureFirebaseUser();
   const existing = await executeQuery<ListStudentsResult, undefined>(queryRef(dataConnect, "ListStudents"), {
     fetchPolicy: "SERVER_ONLY"
   });
-  const savedStudentsByNumber = new Map(
-    existing.data.students
-      .filter((student) => student.studentNumber)
-      .map((student) => [student.studentNumber as string, student])
-  );
-  let createdCount = 0;
-  let updatedCount = 0;
-
-  for (const row of rows) {
-    const savedStudent = savedStudentsByNumber.get(row.id);
-    const nameParts = namePartsFor(row.student);
-
-    if (savedStudent) {
-      await executeMutation<UpdateStudentNameResult, UpdateStudentVariables>(
-        mutationRef(dataConnect, "UpdateStudentName", {
-          studentId: savedStudent.id,
-          ...nameParts,
-          preferredName: null
-        })
-      );
-      updatedCount += 1;
-      continue;
-    }
-
-    await executeMutation<CreateStudentResult, StudentVariables>(
-      mutationRef(dataConnect, "CreateStudent", {
-        ...nameParts,
-        preferredName: null,
-        studentNumber: row.id
-      })
-    ).catch((error) => {
-      if (!isAlreadyExistsError(error)) throw error;
-      savedStudentsByNumber.set(row.id, {
-        id: row.id,
-        ...nameParts,
-        preferredName: null,
-        studentNumber: row.id,
-        active: true
-      });
-    });
-    if (savedStudentsByNumber.get(row.id)?.id === row.id) {
-      updatedCount += 1;
-      continue;
-    }
-    savedStudentsByNumber.set(row.id, {
-      id: row.id,
-      ...nameParts,
-      preferredName: null,
-      studentNumber: row.id,
-      active: true
-    });
-    createdCount += 1;
-  }
+  const plan = buildStudentSavePlan(rows, existing.data.students);
+  const results = await runInBatches(plan.actions, STUDENT_WRITE_BATCH_SIZE, executeStudentSaveAction);
+  const createdCount = results.filter((result) => result === "created").length;
+  const updatedCount = results.filter((result) => result === "updated").length;
 
   return {
     createdCount,
-    updatedCount
+    updatedCount,
+    skippedCount: plan.skippedCount,
+    batchCount: Math.ceil(plan.actions.length / STUDENT_WRITE_BATCH_SIZE),
+    durationMs: Date.now() - startedAt
   };
+}
+
+async function executeStudentSaveAction(action: StudentSaveAction): Promise<"created" | "updated"> {
+  if (action.kind === "update") {
+    await executeMutation<UpdateStudentNameResult, typeof action.variables>(
+      mutationRef(dataConnect, "UpdateStudentName", action.variables)
+    );
+    return "updated";
+  }
+
+  try {
+    await executeMutation<CreateStudentResult, typeof action.variables>(
+      mutationRef(dataConnect, "CreateStudent", action.variables)
+    );
+    return "created";
+  } catch (error) {
+    if (!isAlreadyExistsError(error)) throw error;
+
+    const refreshed = await executeQuery<ListStudentsResult, undefined>(queryRef(dataConnect, "ListStudents"), {
+      fetchPolicy: "SERVER_ONLY"
+    });
+    const savedStudent = refreshed.data.students.find((student) => student.studentNumber === action.studentNumber);
+    if (!savedStudent) throw error;
+
+    await executeMutation<UpdateStudentNameResult, UpdateStudentVariables>(
+      mutationRef(dataConnect, "UpdateStudentName", {
+        studentId: savedStudent.id,
+        firstName: action.variables.firstName,
+        lastName: action.variables.lastName,
+        preferredName: action.variables.preferredName
+      })
+    );
+    return "updated";
+  }
 }
 
 function isAlreadyExistsError(error: unknown) {
@@ -216,31 +199,6 @@ async function ensureFirebaseUser() {
 
   throw new Error("Please sign in before saving or loading Firebase data.");
 }
-
-function displayNameFor(student: SavedStudent) {
-  return student.preferredName || [student.firstName, student.lastName].filter(Boolean).join(" ").trim() || "Saved Student";
-}
-
-function namePartsFor(displayName: string): StudentVariables {
-  const parts = displayName.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) {
-    return { firstName: "New", lastName: "Student" };
-  }
-  if (parts.length === 1) {
-    return { firstName: parts[0], lastName: "Student" };
-  }
-  return {
-    firstName: parts.slice(0, -1).join(" "),
-    lastName: parts[parts.length - 1]
-  };
-}
-
-type StudentVariables = {
-  firstName: string;
-  lastName: string;
-  preferredName?: string | null;
-  studentNumber?: string | null;
-};
 
 type UpdateStudentVariables = {
   studentId: string;

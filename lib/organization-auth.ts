@@ -14,6 +14,8 @@ export type TeamMember = {
   email: string;
   role: UserRole;
   status: "invited" | "active";
+  grade: string;
+  homeroom: string;
 };
 
 type RoleClaim = "admin" | "teacher_ea";
@@ -24,11 +26,15 @@ type CallableMember = {
   email: string;
   role: RoleClaim;
   status: "invited" | "active";
+  grade?: string | null;
+  homeroom?: string | null;
 };
 
 type AccessResult = {
   active: boolean;
   role?: RoleClaim;
+  grade?: string | null;
+  homeroom?: string | null;
 };
 
 function organizationFunctions() {
@@ -49,8 +55,10 @@ export function roleToClaim(role: UserRole): RoleClaim {
 }
 
 export async function resolveOrganizationAccess(user: User) {
-  let token = await user.getIdTokenResult(true);
+  let token = await user.getIdTokenResult();
   let role = roleFromClaim(token.claims.role);
+  let grade = textFromClaim(token.claims.grade);
+  let homeroom = textFromClaim(token.claims.homeroom);
   let active = token.claims.organizationId === organizationId && role !== null;
 
   if (!active) {
@@ -62,13 +70,17 @@ export async function resolveOrganizationAccess(user: User) {
     if (result.data.active) {
       token = await user.getIdTokenResult(true);
       role = roleFromClaim(token.claims.role);
+      grade = textFromClaim(token.claims.grade);
+      homeroom = textFromClaim(token.claims.homeroom);
       active = token.claims.organizationId === organizationId && role !== null;
     }
   }
 
   return {
     access: active ? ("active" as const) : ("uninvited" as const),
-    role
+    role,
+    grade,
+    homeroom
   };
 }
 
@@ -98,12 +110,20 @@ export async function inviteOrganizationMember(input: {
   return teamMemberFromCallable(result.data.member);
 }
 
-export async function updateOrganizationMemberRole(uid: string, role: UserRole) {
+export async function updateOrganizationMemberAccess(
+  uid: string,
+  access: { role: UserRole; grade: string; homeroom: string }
+) {
   const updateRole = httpsCallable<
-    { uid: string; role: RoleClaim },
+    { uid: string; role: RoleClaim; grade: string; homeroom: string },
     { member: CallableMember }
   >(organizationFunctions(), "updateOrganizationUserRole");
-  const result = await updateRole({ uid, role: roleToClaim(role) });
+  const result = await updateRole({
+    uid,
+    role: roleToClaim(access.role),
+    grade: access.role === "Admin" ? "" : access.grade.trim(),
+    homeroom: access.role === "Admin" ? "" : access.homeroom.trim()
+  });
   return teamMemberFromCallable(result.data.member);
 }
 
@@ -129,12 +149,33 @@ export function watchOrganizationAccessRevocation(uid: string, onRevoked: () => 
   });
 }
 
+export function watchOrganizationAccessChange(uid: string, onChanged: (version: string) => void) {
+  const accessChange = doc(
+    getFirestore(firebaseApp),
+    "organizations",
+    organizationId,
+    "accessChanges",
+    uid
+  );
+  return onSnapshot(accessChange, (snapshot) => {
+    if (!snapshot.exists()) return;
+    const changedAt = snapshot.get("changedAt") as { toMillis?: () => number } | undefined;
+    onChanged(typeof changedAt?.toMillis === "function" ? String(changedAt.toMillis()) : snapshot.id);
+  });
+}
+
 function teamMemberFromCallable(member: CallableMember): TeamMember {
   return {
     id: member.uid,
     name: member.displayName?.trim() || member.email.split("@")[0],
     email: member.email,
     role: roleFromClaim(member.role) ?? "Teacher / EA",
-    status: member.status
+    status: member.status,
+    grade: member.grade?.trim() ?? "",
+    homeroom: member.homeroom?.trim() ?? ""
   };
+}
+
+function textFromClaim(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
 }

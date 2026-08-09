@@ -3,8 +3,11 @@ import { assessmentTemplates, type AssessmentTemplate } from "./assessment-templ
 import {
   assessmentValueKey,
   buildEntryRows,
+  isEditableAssessmentField,
   sectionsForAssessmentRound,
-  updateAssessmentRowFromTableEdit
+  updateAssessmentRowFromTableEdit,
+  validateAssessmentTableEdit,
+  validateAssessmentValue
 } from "./assessment-entry";
 import { hydrateOrfRow, type OrfResultRow } from "./sample-results";
 
@@ -56,7 +59,7 @@ describe("assessment entry rows", () => {
     expect(keys[2]).toContain("3rd_passage");
   });
 
-  it("does not copy a 1st passage WPM/EPM edit into other passages and recalculates MED and percentile", () => {
+  it("does not copy a 1st passage WPM/EPM edit into other passages and suppresses unapproved percentiles", () => {
     const orf = customOrfTemplate();
     const fall = orf.rounds[0];
     const sections = sectionsForAssessmentRound(orf, fall);
@@ -88,56 +91,71 @@ describe("assessment entry rows", () => {
     expect(entry[secondCwpmKey]).toBeNull();
     expect(entry[thirdCwpmKey]).toBeNull();
     expect(entry[medianKey]).toBe(40);
-    expect(entry[percentileKey]).toBe(25);
+    expect(entry[percentileKey]).toBeNull();
   });
 
-  it("recalculates MED and percentile when CWPM cells are entered directly", () => {
+  it("recalculates MED while suppressing percentiles and keeping CWPM locked", () => {
     const orf = customOrfTemplate();
     const fall = orf.rounds[0];
     const sections = sectionsForAssessmentRound(orf, fall);
+    const wpm = orf.fields.find((field) => field.id === "wpm")!;
+    const epm = orf.fields.find((field) => field.id === "epm")!;
     const cwpm = orf.fields.find((field) => field.id === "orf_cwpm_5")!;
     const median = orf.fields.find((field) => field.id === "orf_med_4")!;
     const percentile = orf.fields.find((field) => field.id === "orf_ile_5")!;
 
     let row = emptyRow();
-    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, cwpm, sections[0]), 42);
-    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, cwpm, sections[1]), 24);
-    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, cwpm, sections[2]), 15);
+    for (const [index, value] of [42, 24, 15].entries()) {
+      row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, wpm, sections[index]), value);
+      row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, epm, sections[index]), 0);
+    }
+    const beforeCalculatedEdit = row;
+    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, cwpm, sections[0]), 999);
     const entry = buildEntryRows([row], orf)[0];
 
+    expect(row).toBe(beforeCalculatedEdit);
+    expect(isEditableAssessmentField(orf, cwpm)).toBe(false);
+    expect(entry[assessmentValueKey(orf, fall, cwpm, sections[0])]).toBe(42);
     expect(entry[assessmentValueKey(orf, fall, median)]).toBe(24);
-    expect(entry[assessmentValueKey(orf, fall, percentile)]).toBe(10);
+    expect(entry[assessmentValueKey(orf, fall, percentile)]).toBeNull();
+  });
+
+  it("does not let a legacy stored CWPM override the calculated WPM minus EPM value", () => {
+    const orf = customOrfTemplate();
+    const fall = orf.rounds[0];
+    const section = sectionsForAssessmentRound(orf, fall)[0];
+    const wpm = orf.fields.find((field) => field.id === "wpm")!;
+    const epm = orf.fields.find((field) => field.id === "epm")!;
+    const cwpm = orf.fields.find((field) => field.id === "orf_cwpm_5")!;
+    const cwpmKey = assessmentValueKey(orf, fall, cwpm, section);
+
+    let row = updateAssessmentRowFromTableEdit(emptyRow(), orf, assessmentValueKey(orf, fall, wpm, section), 52);
+    row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, epm, section), 7);
+    const rowWithLegacyCwpm = {
+      ...row,
+      assessmentValues: { ...row.assessmentValues, [cwpmKey]: 999 }
+    };
+
+    expect(buildEntryRows([rowWithLegacyCwpm], orf)[0][cwpmKey]).toBe(45);
   });
 
   it("keeps the same student's ORF values separate by school year and grade", () => {
     const orf = customOrfTemplate();
     const fall = orf.rounds[0];
     const sections = sectionsForAssessmentRound(orf, fall);
-    const cwpm = orf.fields.find((field) => field.id === "orf_cwpm_5")!;
+    const wpm = orf.fields.find((field) => field.id === "wpm")!;
+    const epm = orf.fields.find((field) => field.id === "epm")!;
     const median = orf.fields.find((field) => field.id === "orf_med_4")!;
 
     let row = emptyRow();
-    row = updateAssessmentRowFromTableEdit(
-      row,
-      orf,
-      assessmentValueKey(orf, fall, cwpm, sections[0]),
-      67,
-      { schoolYear: "2024-2025", grade: "3" }
-    );
-    row = updateAssessmentRowFromTableEdit(
-      row,
-      orf,
-      assessmentValueKey(orf, fall, cwpm, sections[0]),
-      73,
-      { schoolYear: "2025-2026", grade: "4" }
-    );
-    row = updateAssessmentRowFromTableEdit(
-      row,
-      orf,
-      assessmentValueKey(orf, fall, cwpm, sections[0]),
-      75,
-      { schoolYear: "2026-2027", grade: "5" }
-    );
+    for (const [context, value] of [
+      [{ schoolYear: "2024-2025", grade: "3" }, 67],
+      [{ schoolYear: "2025-2026", grade: "4" }, 73],
+      [{ schoolYear: "2026-2027", grade: "5" }, 75]
+    ] as const) {
+      row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, wpm, sections[0]), value, context);
+      row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, fall, epm, sections[0]), 0, context);
+    }
 
     expect(buildEntryRows([row], orf, { schoolYear: "2024-2025", grade: "3" })[0][assessmentValueKey(orf, fall, median)]).toBe(67);
     expect(buildEntryRows([row], orf, { schoolYear: "2025-2026", grade: "4" })[0][assessmentValueKey(orf, fall, median)]).toBe(73);
@@ -196,6 +214,25 @@ describe("assessment entry rows", () => {
     expect(entryRows[2][percentileKey]).toBe(83);
   });
 
+  it("keeps the full Quick Write cohort when only one student is rendered", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const fall = quickWrite.rounds[0];
+    const cws = quickWrite.fields.find((field) => field.id === "cws")!;
+    const percentile = quickWrite.fields.find((field) => field.id === "quick-write-percentile")!;
+    const context = { schoolYear: "2026-2027", grade: "3" };
+    const cohortRows = [
+      { ...emptyRow(), id: "student-low", student: "Low Student" },
+      { ...emptyRow(), id: "student-mid", student: "Mid Student" },
+      { ...emptyRow(), id: "student-high", student: "High Student" }
+    ].map((row, index) =>
+      updateAssessmentRowFromTableEdit(row, quickWrite, assessmentValueKey(quickWrite, fall, cws), [10, 20, 30][index], context)
+    );
+
+    const filteredEntry = buildEntryRows([cohortRows[0]], quickWrite, { ...context, cohortRows })[0];
+
+    expect(filteredEntry[assessmentValueKey(quickWrite, fall, percentile)]).toBe(17);
+  });
+
   it("calculates Percentage from Score divided by Total in the current section", () => {
     const template: AssessmentTemplate = {
       id: "sectioned-percentage",
@@ -251,5 +288,57 @@ describe("assessment entry rows", () => {
     const entry = buildEntryRows([row], template)[0];
 
     expect(entry[assessmentValueKey(template, fall, percentage, section)]).toBe(75);
+  });
+});
+
+describe("assessment value validation", () => {
+  it("accepts whole-number integers and rejects decimals, scientific notation, hex, negatives, and unsafe values", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const integerField = quickWrite.fields.find((field) => field.id === "tww")!;
+
+    expect(validateAssessmentValue("42", integerField)).toMatchObject({ valid: true, value: 42 });
+    expect(validateAssessmentValue("3.5", integerField).valid).toBe(false);
+    expect(validateAssessmentValue("1e3", integerField).valid).toBe(false);
+    expect(validateAssessmentValue("0x10", integerField).valid).toBe(false);
+    expect(validateAssessmentValue(-1, integerField).valid).toBe(false);
+    expect(validateAssessmentValue(Number.MAX_SAFE_INTEGER + 1, integerField).valid).toBe(false);
+  });
+
+  it("allows decimal percentages while enforcing the configured range and precision", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const percentageField = {
+      ...quickWrite.fields[0],
+      id: "percentage-input",
+      name: "Percentage",
+      slug: "percentage_input",
+      dataType: "percentage" as const,
+      validationConfig: { min: 0, max: 100, precision: 2 }
+    };
+
+    expect(validateAssessmentValue("12.5", percentageField)).toMatchObject({ valid: true, value: 12.5 });
+    expect(validateAssessmentValue("12.345", percentageField).valid).toBe(false);
+    expect(validateAssessmentValue("101", percentageField).valid).toBe(false);
+  });
+
+  it("prevents Score from exceeding the paired Total in either edit order", () => {
+    const numeracy = assessmentTemplates.find((assessment) => assessment.id === "ab-ed-numeracy") as AssessmentTemplate;
+    const fall = numeracy.rounds[0];
+    const score = numeracy.fields.find((field) => field.groupLabel === "Comparing Numbers" && field.slug.endsWith("_score"))!;
+    const total = numeracy.fields.find((field) => field.groupLabel === "Comparing Numbers" && field.slug.endsWith("_total"))!;
+    const scoreKey = assessmentValueKey(numeracy, fall, score);
+    const totalKey = assessmentValueKey(numeracy, fall, total);
+
+    let row = updateAssessmentRowFromTableEdit(emptyRow(), numeracy, totalKey, 10);
+    const beforeInvalidScore = row;
+    row = updateAssessmentRowFromTableEdit(row, numeracy, scoreKey, 11);
+    expect(row).toBe(beforeInvalidScore);
+    expect(validateAssessmentTableEdit(row, numeracy, scoreKey, 11).valid).toBe(false);
+
+    row = updateAssessmentRowFromTableEdit(row, numeracy, scoreKey, 8);
+    const beforeInvalidTotal = row;
+    row = updateAssessmentRowFromTableEdit(row, numeracy, totalKey, 7);
+    expect(row).toBe(beforeInvalidTotal);
+    expect(buildEntryRows([row], numeracy)[0][scoreKey]).toBe(8);
+    expect(buildEntryRows([row], numeracy)[0][totalKey]).toBe(10);
   });
 });

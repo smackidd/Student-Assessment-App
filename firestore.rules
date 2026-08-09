@@ -15,6 +15,12 @@ service cloud.firestore {
       return signedIn() && email() == 'stevemackidd@gmail.com';
     }
 
+    function isOrganizationAdmin(orgId) {
+      return signedIn()
+        && request.auth.token.organizationId == orgId
+        && request.auth.token.role == 'admin';
+    }
+
     function canUseRun() {
       return signedIn();
     }
@@ -152,6 +158,18 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.auth.token.organizationId == orgId;
       allow list, create, update, delete: if false;
+    }
+
+    match /organizations/{orgId}/accessChanges/{userId} {
+      allow get: if signedIn()
+        && request.auth.uid == userId
+        && request.auth.token.organizationId == orgId;
+      allow list, create, update, delete: if false;
+    }
+
+    match /organizations/{orgId}/auditEvents/{eventId} {
+      allow read: if isOrganizationAdmin(orgId);
+      allow create, update, delete: if false;
     }
 
     match /{document=**} {

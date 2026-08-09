@@ -32,7 +32,7 @@ Role values saved in browser state or the prototype workspace JSON are not trust
 4. The function assigns the organization and role custom claims.
 5. Firebase generates a one-time password setup link.
 6. The function sends the branded invitation through Resend.
-7. The invited user sets their password and then signs in.
+7. The invited user sets their password and returns through an invitation handoff URL. The app signs out any account already active in that browser and asks the invited person to sign in with their new credentials.
 8. The app reads the signed Firebase ID token and opens only the features allowed by the role.
 
 The `blockPublicSignUp` blocking function rejects client-created accounts. The `blockUninvitedSignIn` blocking function rejects accounts without organization claims.
@@ -99,6 +99,7 @@ Recommended follow-up controls:
 - Keep email enumeration protection enabled.
 - Record invite, role-change, and access-revocation events in the audit log.
 - Revoke refresh tokens whenever a role changes or a user is removed.
+- Publish a server-owned `accessChanges/{uid}` notification when a role, grade, or homeroom changes. The signed-in client refreshes its token from that notification and discards any older async membership result whose UID/session generation is no longer current.
 - Add an Admin action to disable a user rather than deleting their historical audit identity.
 
 ## Single-organization alternative

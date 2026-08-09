@@ -14,6 +14,10 @@ export type AssessmentValueContext = {
   cohortRows?: OrfResultRow[];
 };
 
+export type AssessmentValueValidationResult =
+  | { valid: true; value: AssessmentValue; error: null }
+  | { valid: false; value: null; error: string };
+
 export function buildEntryRows(rows: OrfResultRow[], selected: AssessmentTemplate[], context?: AssessmentValueContext): EntryRow[];
 export function buildEntryRows(rows: OrfResultRow[], selected: AssessmentTemplate, context?: AssessmentValueContext): EntryRow[];
 export function buildEntryRows(
@@ -79,8 +83,7 @@ export function entryValue(
   section?: AssessmentSectionTemplate,
   context: AssessmentValueContext = {}
 ) {
-  const meaning = assessment.id === "orf" ? assessmentFieldMeaning(field) : "";
-  if (assessment.id === "orf" && field.isCalculated && meaning !== "cwpm") {
+  if (assessment.id === "orf" && field.isCalculated) {
     return orfEntryValue(row, assessment, round, field, section, context);
   }
   if (field.isCalculated && assessmentFieldMeaning(field) === "quick_write_percentile") {
@@ -159,20 +162,50 @@ function matchingCalculationInputField(
   meaning: "score" | "total",
   calculatedField: AssessmentFieldTemplate
 ) {
-  const sectionsForRound = sectionsForAssessmentRound(assessment, round);
-  return assessment.fields
-    .filter((field) => field.id !== calculatedField.id && (!field.roundIds?.length || field.roundIds.includes(round.id)))
-    .find((field) => {
-      if (assessmentFieldMeaning(field) !== meaning) return false;
-      const fieldSections = sectionsForField(assessment, round, field, sectionsForRound);
-      if (section) return fieldSections.some((candidate) => candidate.id === section.id);
-      return fieldSections.length === 0;
-    });
+  return matchingPairedField(assessment, round, section, meaning, calculatedField);
 }
 
-export function isEditableAssessmentField(assessment: AssessmentTemplate, field: AssessmentFieldTemplate) {
-  if (field.dataType === "file") return false;
-  if (assessment.id === "orf" && assessmentFieldMeaning(field) === "cwpm") return true;
+function matchingPairedField(
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  section: AssessmentSectionTemplate | undefined,
+  meaning: "score" | "total",
+  sourceField: AssessmentFieldTemplate
+) {
+  const sectionsForRound = sectionsForAssessmentRound(assessment, round);
+  const candidates = assessment.fields.filter((field) => {
+    if (field.id === sourceField.id || assessmentFieldMeaning(field) !== meaning) return false;
+    if (field.roundIds?.length && !field.roundIds.includes(round.id)) return false;
+    const fieldSections = sectionsForField(assessment, round, field, sectionsForRound);
+    return section
+      ? fieldSections.some((candidate) => candidate.id === section.id)
+      : fieldSections.length === 0;
+  });
+
+  if (sourceField.groupLabel) {
+    const grouped = candidates.filter((field) => field.groupLabel === sourceField.groupLabel);
+    if (grouped.length === 1) return grouped[0];
+  }
+
+  const sourceGroupKey = calculationGroupKey(sourceField);
+  if (sourceGroupKey) {
+    const matchingGroup = candidates.filter((field) => calculationGroupKey(field) === sourceGroupKey);
+    if (matchingGroup.length === 1) return matchingGroup[0];
+  }
+
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function calculationGroupKey(field: AssessmentFieldTemplate) {
+  if (field.groupLabel) return slugForAssessmentKey(field.groupLabel);
+  const candidate = [field.slug, field.id, field.name]
+    .map(slugForAssessmentKey)
+    .find((value) => /_(score|total|percentage|percent|pct)$/.test(value));
+  return candidate?.replace(/_(score|total|percentage|percent|pct)$/, "") || undefined;
+}
+
+export function isEditableAssessmentField(_assessment: AssessmentTemplate, field: AssessmentFieldTemplate) {
+  if (field.dataType === "file" || field.dataType === "calculated") return false;
   return !field.isCalculated;
 }
 
@@ -233,7 +266,7 @@ export function calculateOrfWindow(
           context
         )
       : null;
-    const storedCwpm = cwpmField
+    const storedCwpm = cwpmField && !cwpmField.isCalculated
       ? storedAssessmentNumber(
           row,
           assessment,
@@ -267,6 +300,114 @@ function orfPassageIndex(assessment: AssessmentTemplate, round: AssessmentRoundT
   return sectionIndex >= 0 ? sectionIndex : 0;
 }
 
+export function validateAssessmentValue(
+  value: unknown,
+  field: AssessmentFieldTemplate
+): AssessmentValueValidationResult {
+  if (value === null || typeof value === "undefined" || (typeof value === "string" && value.trim() === "")) {
+    return { valid: true, value: null, error: null };
+  }
+
+  if (field.dataType !== "integer" && field.dataType !== "percentage" && field.dataType !== "calculated") {
+    return { valid: true, value: String(value), error: null };
+  }
+
+  const rawValue = typeof value === "string" ? value.trim() : value;
+  const numericPattern = field.dataType === "integer"
+    ? /^[+-]?\d+$/
+    : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+
+  if (typeof rawValue !== "number" && (typeof rawValue !== "string" || !numericPattern.test(rawValue))) {
+    return {
+      valid: false,
+      value: null,
+      error: field.dataType === "integer"
+        ? `${field.name} must be a whole number.`
+        : `${field.name} must be a number.`
+    };
+  }
+
+  const numericValue = typeof rawValue === "number" ? rawValue : Number(rawValue);
+  if (!Number.isFinite(numericValue)) {
+    return { valid: false, value: null, error: `${field.name} must be a finite number.` };
+  }
+  if (field.dataType === "integer" && !Number.isSafeInteger(numericValue)) {
+    return { valid: false, value: null, error: `${field.name} must be a whole number.` };
+  }
+
+  const minimum = field.validationConfig?.min ?? 0;
+  const maximum = field.validationConfig?.max ?? (field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER);
+  if (numericValue < minimum || numericValue > maximum) {
+    return {
+      valid: false,
+      value: null,
+      error: `${field.name} must be between ${minimum} and ${maximum}.`
+    };
+  }
+
+  const precision = field.validationConfig?.precision;
+  if (typeof precision === "number" && decimalPlaces(rawValue) > precision) {
+    return {
+      valid: false,
+      value: null,
+      error: `${field.name} can have at most ${precision} decimal place${precision === 1 ? "" : "s"}.`
+    };
+  }
+
+  return { valid: true, value: numericValue, error: null };
+}
+
+function decimalPlaces(value: string | number) {
+  const [, fraction = ""] = String(value).split(".");
+  return fraction.length;
+}
+
+export function validateAssessmentTableEdit(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  fieldName: string,
+  newValue: unknown,
+  context: AssessmentValueContext = {}
+): AssessmentValueValidationResult {
+  const cell = findAssessmentCell(assessment, fieldName);
+  if (!cell) return { valid: false, value: null, error: "This assessment field is no longer available." };
+  if (!isEditableAssessmentField(assessment, cell.field)) {
+    return { valid: false, value: null, error: `${cell.field.name} cannot be edited.` };
+  }
+
+  const validation = validateAssessmentValue(newValue, cell.field);
+  if (!validation.valid || typeof validation.value !== "number") return validation;
+
+  const meaning = assessmentFieldMeaning(cell.field);
+  if (meaning !== "score" && meaning !== "total") return validation;
+
+  const counterpartMeaning = meaning === "score" ? "total" : "score";
+  const counterpart = matchingPairedField(
+    assessment,
+    cell.round,
+    cell.section,
+    counterpartMeaning,
+    cell.field
+  );
+  if (!counterpart) return validation;
+
+  const counterpartValue = entryValue(row, assessment, cell.round, counterpart, cell.section, context);
+  const counterpartNumber = toNumber(counterpartValue);
+  if (typeof counterpartNumber !== "number") return validation;
+
+  const score = meaning === "score" ? validation.value : counterpartNumber;
+  const total = meaning === "total" ? validation.value : counterpartNumber;
+  if (score > total) {
+    return {
+      valid: false,
+      value: null,
+      error: `${cell.field.name} is invalid because Score (${score}) cannot exceed Total (${total}).`
+    };
+  }
+
+  return validation;
+}
+
 export function updateAssessmentRowFromTableEdit(
   row: OrfResultRow,
   assessment: AssessmentTemplate,
@@ -277,7 +418,9 @@ export function updateAssessmentRowFromTableEdit(
   const cell = findAssessmentCell(assessment, fieldName);
   if (!cell) return row;
 
-  const value = normalizedAssessmentValue(newValue, cell.field);
+  const validation = validateAssessmentTableEdit(row, assessment, fieldName, newValue, context);
+  if (!validation.valid) return row;
+  const value = validation.value;
   const storedKey = assessmentValueKey(assessment, cell.round, cell.field, cell.section, context);
   const nextRow: OrfResultRow = {
     ...row,
@@ -454,11 +597,8 @@ function slugForAssessmentKey(value: string) {
 }
 
 export function normalizedAssessmentValue(value: unknown, field: AssessmentFieldTemplate): AssessmentValue {
-  if (field.dataType === "integer" || field.dataType === "percentage" || field.dataType === "calculated") {
-    return toNumber(value);
-  }
-  if (value === null || typeof value === "undefined") return null;
-  return String(value);
+  const validation = validateAssessmentValue(value, field);
+  return validation.valid ? validation.value : null;
 }
 
 function assessmentFieldMeaning(field: AssessmentFieldTemplate) {
@@ -513,7 +653,11 @@ export function fieldSectionSummary(template: AssessmentTemplate, field: Assessm
 }
 
 export function toNumber(value: unknown) {
-  if (value === "" || value === null || typeof value === "undefined") return null;
-  const numberValue = Number(value);
+  if (value === null || typeof value === "undefined") return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const trimmedValue = value.trim();
+  if (!trimmedValue || !/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(trimmedValue)) return null;
+  const numberValue = Number(trimmedValue);
   return Number.isFinite(numberValue) ? numberValue : null;
 }

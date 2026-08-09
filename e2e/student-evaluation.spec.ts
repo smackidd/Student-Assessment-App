@@ -31,7 +31,7 @@ test("VP can use left navigation, configure fields and rounds, and see audit his
 test("entry table is generated from assessment builder fields and keeps calculated fields locked", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Literacy Oral Reading Fluency" }).click();
-  await page.getByRole("button", { name: "Inline Entry Table" }).click();
+  await page.getByRole("button", { name: "Table", exact: true }).click();
 
   await expect(page.getByText("Columns come from the Assessment Builder")).toBeVisible();
 
@@ -62,7 +62,7 @@ test("overview, dashboard filters, notes popup, reports, and files render core w
   await expect(page.getByText("Quick Write").first()).toBeVisible();
   await expect(page.getByText("AB Ed Numeracy").first()).toBeVisible();
 
-  await page.getByRole("button", { name: "Add new year" }).click();
+  await page.getByRole("button", { name: "Add Year" }).click();
   await expect(page.getByText("No students are assigned to a homeroom")).toBeVisible();
 
   await page.getByRole("button", { name: "Add homeroom / students" }).click();
@@ -73,11 +73,18 @@ test("overview, dashboard filters, notes popup, reports, and files render core w
   await expect(page.getByText("3Z").first()).toBeVisible();
   await expect(page.locator(".notes-icon").first()).toHaveText("✎");
 
+  await page.getByRole("button", { name: "Add homeroom / students" }).click();
+  const addSecondHomeroomDialog = page.getByRole("dialog", { name: "Add homeroom and students" });
+  await addSecondHomeroomDialog.getByLabel("Home room", { exact: true }).fill("3Y");
+  await addSecondHomeroomDialog.getByLabel("Number of students", { exact: true }).fill("1");
+  await addSecondHomeroomDialog.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByText("3Y").first()).toBeVisible();
+
   await page.getByRole("button", { name: /Move New Student 1/ }).click();
-  await expect(page.getByRole("dialog", { name: "Move student" })).toBeVisible();
-  await page.locator(".notes-modal select").selectOption("custom");
-  await page.locator(".notes-modal input").fill("3Y");
-  await page.getByRole("button", { name: "Move", exact: true }).click();
+  const moveDialog = page.getByRole("dialog", { name: "Move student" });
+  await expect(moveDialog).toBeVisible();
+  await moveDialog.getByLabel("Home room", { exact: true }).selectOption("3Y");
+  await moveDialog.getByRole("button", { name: "Move", exact: true }).click();
   await expect(page.getByText("3Y").first()).toBeVisible();
 
   await page.getByRole("button", { name: /Remove New Student 1/ }).click();

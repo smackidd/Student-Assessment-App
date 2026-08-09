@@ -1268,6 +1268,20 @@ textarea {
   white-space: nowrap;
 }
 
+.overview-toolbar .overview-options-action {
+  margin-left: auto;
+}
+
+.danger-outline-action {
+  border-color: rgba(185, 54, 42, 0.4);
+  color: #8d2118;
+}
+
+.danger-outline-action:hover:not(:disabled) {
+  border-color: #b9362a;
+  background: #fff0ed;
+}
+
 .overview-toolbar > button:first-child,
 .overview-toolbar .fullscreen-action {
   height: 37px;
@@ -1287,6 +1301,69 @@ textarea {
 
 .table-card-fullscreen .overview-toolbar button:not(.fullscreen-action) {
   display: none;
+}
+
+.table-card-fullscreen .overview-student-search-row {
+  display: none;
+}
+
+.overview-student-search-row {
+  position: relative;
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  margin: -4px 0 14px;
+}
+
+.overview-student-search {
+  flex: 1 1 360px;
+  max-width: 560px;
+  margin-top: 0;
+}
+
+.overview-student-search-results {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 4px);
+  left: 0;
+  width: min(560px, 100%);
+  display: grid;
+  gap: 4px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 16px 36px rgba(16, 24, 32, 0.18);
+}
+
+.overview-student-search-results button {
+  display: grid;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.overview-student-search-results button:hover {
+  border-color: rgba(212, 167, 44, 0.42);
+  background: #fff1bf;
+}
+
+.overview-student-search-results span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.read-only-grid-cell {
+  background: #f3f1ea;
+  color: var(--ink-2);
+  cursor: default;
 }
 
 .toolbar-action {
@@ -1696,8 +1773,8 @@ textarea {
 }
 
 .student-name-suggestions button {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1710,6 +1787,18 @@ textarea {
   font-weight: 800;
 }
 
+.student-name-suggestions button strong,
+.student-name-suggestions button small {
+  grid-column: 1;
+  text-align: left;
+}
+
+.student-name-suggestions button small {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
 .student-name-suggestions button.active,
 .student-name-suggestions button:hover {
   border-color: rgba(212, 167, 44, 0.42);
@@ -1717,6 +1806,9 @@ textarea {
 }
 
 .student-name-suggestions span {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 900;
@@ -1913,6 +2005,11 @@ textarea {
   color: #215d2c;
 }
 
+.import-status.reverting {
+  background: #fff1bf;
+  color: #725312;
+}
+
 .import-results {
   display: grid;
   gap: 8px;
@@ -2096,6 +2193,25 @@ textarea {
   margin-top: 0;
 }
 
+.audit-revert-feedback {
+  margin: -4px 0 14px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff1bf;
+  color: #725312;
+  font-weight: 800;
+}
+
+.audit-revert-feedback.success {
+  background: #ddf2d7;
+  color: #215d2c;
+}
+
+.audit-revert-feedback.error {
+  background: #ffd8d2;
+  color: #8d2118;
+}
+
 .audit-list-panel {
   display: grid;
   grid-template-rows: auto auto;
@@ -2192,6 +2308,37 @@ textarea {
   background: var(--panel-2);
 }
 
+.field-help {
+  display: block;
+  margin-top: -6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.field-error {
+  color: #8d2118;
+  font-weight: 800;
+}
+
+.profile-readonly-field {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-height: 68px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.profile-readonly-field span,
+.entry-scope-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
 .profile-role span {
   color: var(--muted);
   font-size: 0.8rem;
@@ -2235,7 +2382,7 @@ textarea {
 }
 
 .team-row {
-  grid-template-columns: auto minmax(0, 1fr) 220px auto;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(150px, 190px) minmax(130px, 160px) minmax(140px, 180px) auto;
   align-items: center;
 }
 

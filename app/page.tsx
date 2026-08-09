@@ -6,12 +6,9 @@ import { AgGridReact } from "ag-grid-react";
 import {
   AllCommunityModule,
   ModuleRegistry,
-  type CellFocusedEvent,
   type CellValueChangedEvent,
-  type CellPosition,
   type ColDef,
-  type Column,
-  type TabToNextCellParams
+  type ICellEditorParams
 } from "ag-grid-community";
 import {
   CartesianGrid,
@@ -26,7 +23,7 @@ import * as XLSX from "xlsx-js-style";
 import {
   EmailAuthProvider,
   getAuth,
-  onAuthStateChanged,
+  onIdTokenChanged,
   reauthenticateWithCredential,
   sendPasswordResetEmail,
   signInWithEmailAndPassword,
@@ -54,11 +51,11 @@ import {
   fieldWindowSummary,
   isEditableAssessmentField,
   labelsForIds,
-  normalizedAssessmentValue,
   sectionsForAssessmentRound,
-  toNumber,
   uniqueIds,
   updateAssessmentRowFromTableEdit,
+  validateAssessmentTableEdit,
+  validateAssessmentValue,
   type EntryRow
 } from "@/lib/assessment-entry";
 import {
@@ -66,15 +63,41 @@ import {
   savePrototypeWorkspaceState,
   saveStudentsToDatabase
 } from "@/lib/student-database";
+import {
+  buildStudentIdentityOptions,
+  buildStudentSearchOptions,
+  deleteSchoolYearFromOverview,
+  moveStudentToExistingHomeroom,
+  parseOverviewStudentCount,
+  reassignPlaceholderToExistingStudent,
+  type StudentIdentityOption,
+  type StudentPlacement,
+  type StudentSearchOption
+} from "@/lib/overview-state";
 import { firebaseApp } from "@/lib/firebase";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
+import {
+  mergeAuditEvents,
+  sortAuditEvents,
+  type AuditSortKey,
+  type OrganizationAuditEvent
+} from "@/lib/audit-events";
+import { recordOrganizationAuditEvent, watchOrganizationAuditEvents } from "@/lib/audit-log";
+import {
+  readNavigationPreference,
+  writeNavigationPreference,
+  type AppView,
+  type AssessmentPageTab,
+  type ProfilePageTab
+} from "@/lib/navigation-preferences";
 import {
   deleteOrganizationMember,
   inviteOrganizationMember,
   listOrganizationMembers,
   resolveOrganizationAccess,
   roles,
-  updateOrganizationMemberRole,
+  updateOrganizationMemberAccess,
+  watchOrganizationAccessChange,
   watchOrganizationAccessRevocation,
   type OrganizationAccess,
   type TeamMember,
@@ -123,11 +146,10 @@ const pastelRoundColors = [
   "#f7e0d2"
 ];
 
-type AppView = "overview" | "dashboard" | "assessment" | "report" | "files" | "profile";
-type AssessmentPageTab = "builder" | "entry";
-type ProfilePageTab = "profile" | "password" | "audit" | "team";
 type StudentNotePermission = "admin_only" | "all";
 type SaveStatus = "saved" | "dirty" | "saving" | "error";
+type ImportRevertOutcome = "reverted" | "reverted-audit-pending" | "cancelled" | "unavailable";
+type AppAuditEvent = OrganizationAuditEvent;
 type RecordAudit = (
   eventType: string,
   entityType: string,
@@ -161,6 +183,8 @@ export default function StudentEvaluationApp() {
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
   const [organizationAccess, setOrganizationAccess] = useState<OrganizationAccess>("checking");
+  const [workspaceReadyForUid, setWorkspaceReadyForUid] = useState<string | null>(null);
+  const [navigationReadyForUid, setNavigationReadyForUid] = useState<string | null>(null);
   const [orfRows, setOrfRows] = useState<OrfResultRow[]>([]);
   const [schoolYears, setSchoolYears] = useState(dashboardYears);
   const [selectedOverviewYear, setSelectedOverviewYear] = useState(dashboardYears[0]);
@@ -169,9 +193,10 @@ export default function StudentEvaluationApp() {
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved");
   const [saveMessage, setSaveMessage] = useState("No unsaved table changes.");
   const [unsavedAlertDismissed, setUnsavedAlertDismissed] = useState(false);
-  const [databaseStudentNames, setDatabaseStudentNames] = useState<string[]>([]);
+  const [databaseStudentOptions, setDatabaseStudentOptions] = useState<StudentIdentityOption[]>([]);
   const [overviewDuplicateConflicts, setOverviewDuplicateConflicts] = useState<DuplicateStudentNameConflict[]>([]);
   const [overviewChangedStudentIds, setOverviewChangedStudentIds] = useState<Set<string>>(new Set());
+  const [overviewStudentFilterId, setOverviewStudentFilterId] = useState<string | null>(null);
   const [lastSavedWorkspaceState, setLastSavedWorkspaceState] = useState<SavedWorkspaceState | null>(null);
   const [lockedOverviewYears, setLockedOverviewYears] = useState<string[]>([]);
   const [overviewPlacements, setOverviewPlacements] = useState<StudentPlacement[]>([]);
@@ -179,6 +204,8 @@ export default function StudentEvaluationApp() {
   const [activeNoteStudentId, setActiveNoteStudentId] = useState<string | null>(null);
   const [overviewDialog, setOverviewDialog] = useState<OverviewDialog>(null);
   const [importLogs, setImportLogs] = useState<ImportChangeLog[]>([]);
+  const revertingImportIdsRef = useRef(new Set<string>());
+  const handledAccessChangeRef = useRef<string | null>(null);
   const [auditEvents, setAuditEvents] = useState<AppAuditEvent[]>([
     {
       id: "audit-seed-1",
@@ -238,14 +265,40 @@ export default function StudentEvaluationApp() {
   const activeOverviewRows = useMemo(
     () =>
       overviewPlacements
-        .filter((placement) => placement.schoolYear === selectedOverviewYear && placement.grade === selectedOverviewGrade)
+        .filter(
+          (placement) =>
+            placement.schoolYear === selectedOverviewYear &&
+            placement.grade === selectedOverviewGrade &&
+            (isAdmin || placement.homeroom === userProfile.homeroom)
+        )
         .map((placement) => {
           const row = orfRows.find((studentRow) => studentRow.id === placement.studentId);
           return row ? { ...row, homeroom: placement.homeroom } : null;
         })
         .filter((row): row is OrfResultRow => Boolean(row)),
-    [orfRows, overviewPlacements, selectedOverviewGrade, selectedOverviewYear]
+    [isAdmin, orfRows, overviewPlacements, selectedOverviewGrade, selectedOverviewYear, userProfile.homeroom]
   );
+  const overviewStudentSearchOptions = useMemo(
+    () => buildStudentSearchOptions(orfRows, overviewPlacements),
+    [orfRows, overviewPlacements]
+  );
+  const authorizedPlacements = useMemo(
+    () =>
+      isAdmin
+        ? overviewPlacements
+        : overviewPlacements.filter(
+            (placement) =>
+              placement.schoolYear === selectedOverviewYear &&
+              placement.grade === userProfile.grade &&
+              placement.homeroom === userProfile.homeroom
+          ),
+    [isAdmin, overviewPlacements, selectedOverviewYear, userProfile.grade, userProfile.homeroom]
+  );
+  const authorizedRows = useMemo(() => {
+    if (isAdmin) return orfRows;
+    const authorizedStudentIds = new Set(authorizedPlacements.map((placement) => placement.studentId));
+    return orfRows.filter((row) => authorizedStudentIds.has(row.id));
+  }, [authorizedPlacements, isAdmin, orfRows]);
   const overviewHomerooms = useMemo(
     () =>
       Array.from(
@@ -262,66 +315,121 @@ export default function StudentEvaluationApp() {
 
   useEffect(() => {
     const auth = getAuth(firebaseApp);
-    return onAuthStateChanged(auth, async (user) => {
-      setAuthReady(false);
-      setAuthUser(user);
-      setOrganizationAccess("checking");
+    let unsubscribe = () => {};
+    let cancelled = false;
+    let authGeneration = 0;
+    let activeUid: string | null | undefined;
 
-      if (!user) {
-        setTeamMembers([]);
-        setOrganizationAccess("uninvited");
-        setAuthReady(true);
-        return;
+    async function startAuthentication() {
+      const currentUrl = new URL(window.location.href);
+      const isInvitationHandoff = currentUrl.searchParams.get("invited") === "1";
+
+      if (isInvitationHandoff) {
+        await auth.authStateReady();
+        if (auth.currentUser) await signOut(auth);
+        currentUrl.searchParams.delete("invited");
+        window.history.replaceState({}, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
       }
 
-      const fallbackName = user.displayName || user.email?.split("@")[0] || "Team Member";
-      setUserProfile((profile) => ({
-        ...profile,
-        name: profile.name || fallbackName,
-        email: profile.email || user.email || ""
-      }));
+      if (cancelled) return;
+      unsubscribe = onIdTokenChanged(auth, async (user) => {
+        const generation = ++authGeneration;
+        const nextUid = user?.uid ?? null;
+        const accountChanged = activeUid !== nextUid;
+        activeUid = nextUid;
+        const isCurrentSession = () =>
+          !cancelled
+          && generation === authGeneration
+          && auth.currentUser?.uid === user?.uid;
 
-      try {
-        const membership = await resolveOrganizationAccess(user);
-        setOrganizationAccess(membership.access);
-        if (membership.role) {
-          setCurrentUserRole(membership.role);
-          if (membership.role === "Admin") {
-            try {
-              setTeamMembers(await listOrganizationMembers());
-            } catch {
+        setAuthUser(user);
+        if (accountChanged) {
+          setAuthReady(false);
+          setOrganizationAccess("checking");
+          setWorkspaceReadyForUid(null);
+          setNavigationReadyForUid(null);
+        }
+
+        if (!user) {
+          setTeamMembers([]);
+          setOrganizationAccess("uninvited");
+          setAuthReady(true);
+          return;
+        }
+
+        const fallbackName = user.displayName || user.email?.split("@")[0] || "Team Member";
+        if (accountChanged) {
+          setUserProfile({
+            name: fallbackName,
+            email: user.email || "",
+            grade: "",
+            homeroom: ""
+          });
+        }
+
+        try {
+          const membership = await resolveOrganizationAccess(user);
+          if (!isCurrentSession()) return;
+          setOrganizationAccess(membership.access);
+          if (!membership.role) setTeamMembers([]);
+          if (membership.role) {
+            setCurrentUserRole(membership.role);
+            setUserProfile((profile) => ({
+              ...profile,
+              grade: membership.grade,
+              homeroom: membership.homeroom
+            }));
+            if (membership.role === "Admin") {
+              try {
+                const members = await listOrganizationMembers();
+                if (!isCurrentSession()) return;
+                setTeamMembers(members);
+              } catch {
+                if (!isCurrentSession()) return;
+                setTeamMembers([
+                  {
+                    id: user.uid,
+                    name: fallbackName,
+                    email: user.email || "",
+                    role: membership.role,
+                    status: "active",
+                    grade: membership.grade,
+                    homeroom: membership.homeroom
+                  }
+                ]);
+              }
+            } else {
               setTeamMembers([
                 {
                   id: user.uid,
                   name: fallbackName,
                   email: user.email || "",
                   role: membership.role,
-                  status: "active"
+                  status: "active",
+                  grade: membership.grade,
+                  homeroom: membership.homeroom
                 }
               ]);
             }
-          } else {
-            setTeamMembers([
-              {
-                id: user.uid,
-                name: fallbackName,
-                email: user.email || "",
-                role: membership.role,
-                status: "active"
-              }
-            ]);
           }
+        } catch (error) {
+          if (!isCurrentSession()) return;
+          if (isRemovedAuthSession(error)) {
+            await signOut(auth);
+          } else {
+            setOrganizationAccess("uninvited");
+          }
+        } finally {
+          if (accountChanged && isCurrentSession()) setAuthReady(true);
         }
-      } catch (error) {
-        if (isRemovedAuthSession(error)) {
-          await signOut(auth);
-        } else {
-          setOrganizationAccess("uninvited");
-        }
-      } finally {
-        setAuthReady(true);
-      }
-    });
+      });
+    }
+
+    void startAuthentication();
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   useEffect(() => {
@@ -332,8 +440,64 @@ export default function StudentEvaluationApp() {
   }, [authUser, organizationAccess]);
 
   useEffect(() => {
-    if (!authReady || !authUser || organizationAccess !== "active") return;
+    if (!authUser || organizationAccess !== "active") return;
+    return watchOrganizationAccessChange(authUser.uid, (version) => {
+      const accessChangeKey = `${authUser.uid}:${version}`;
+      if (handledAccessChangeRef.current === accessChangeKey) return;
+      handledAccessChangeRef.current = accessChangeKey;
+      void authUser.getIdToken(true).catch(() => signOut(getAuth(firebaseApp)));
+    });
+  }, [authUser, organizationAccess]);
+
+  useEffect(() => {
+    if (
+      !authReady
+      || !authUser
+      || organizationAccess !== "active"
+      || workspaceReadyForUid !== authUser.uid
+      || navigationReadyForUid === authUser.uid
+    ) return;
+    const preference = readNavigationPreference(
+      authUser.uid,
+      currentUserRole,
+      templates.map((template) => template.id)
+    );
+    setActiveView(preference.activeView);
+    setAssessmentPageTab(preference.assessmentPageTab);
+    setProfilePageTab(preference.profilePageTab);
+    if (preference.selectedAssessmentId) setSelectedId(preference.selectedAssessmentId);
+    setTableFullScreen(false);
+    setNavigationReadyForUid(authUser.uid);
+  }, [authReady, authUser, currentUserRole, navigationReadyForUid, organizationAccess, templates, workspaceReadyForUid]);
+
+  useEffect(() => {
+    if (!authUser || organizationAccess !== "active" || navigationReadyForUid !== authUser.uid) return;
+    writeNavigationPreference(authUser.uid, {
+      version: 1,
+      activeView,
+      assessmentPageTab,
+      profilePageTab,
+      selectedAssessmentId: selectedId
+    });
+  }, [activeView, assessmentPageTab, authUser, navigationReadyForUid, organizationAccess, profilePageTab, selectedId]);
+
+  useEffect(() => {
+    if (!authUser || organizationAccess !== "active" || !isAdmin) return;
+    return watchOrganizationAuditEvents(
+      (cloudEvents) => setAuditEvents((current) => mergeAuditEvents(current, cloudEvents)),
+      (error) => console.error("Audit history could not be loaded from Firestore.", error)
+    );
+  }, [authUser, isAdmin, organizationAccess]);
+
+  useEffect(() => {
+    if (
+      !authReady
+      || !authUser
+      || organizationAccess !== "active"
+      || workspaceReadyForUid === authUser.uid
+    ) return;
     let cancelled = false;
+    const authenticatedUid = authUser.uid;
 
     async function loadSavedStudents() {
       try {
@@ -341,20 +505,40 @@ export default function StudentEvaluationApp() {
         if (cancelled) return;
         if (savedState) {
           const normalizedTemplates = normalizeAssessmentTemplates(savedState.templates);
-          const normalizedSavedState = { ...savedState, templates: normalizedTemplates };
+          let normalizedSavedState = { ...savedState, templates: normalizedTemplates };
+          let recoveredPendingStudentSync = false;
+          let pendingStudentSyncError: Error | null = null;
+          if (savedState.pendingStudentSync) {
+            try {
+              await saveStudentsToDatabase(savedState.rows);
+              if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
+              const reconciledWorkspaceState = { ...normalizedSavedState, pendingStudentSync: false };
+              await savePrototypeWorkspaceState(reconciledWorkspaceState);
+              normalizedSavedState = reconciledWorkspaceState;
+              recoveredPendingStudentSync = true;
+            } catch (error) {
+              pendingStudentSyncError = error instanceof Error ? error : new Error("The pending SQL synchronization failed.");
+            }
+          }
+          if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
           setOrfRows(savedState.rows);
           setOverviewPlacements(savedState.placements);
           setTemplates(normalizedTemplates);
           setSchoolYears(savedState.schoolYears);
           setLastSavedWorkspaceState(normalizedSavedState);
-          setDatabaseStudentNames(uniqueStudentNames(savedState.rows));
+          setDatabaseStudentOptions(buildStudentIdentityOptions(savedState.rows, savedState.placements));
           setOverviewChangedStudentIds(new Set());
           setLockedOverviewYears(savedState.lockedOverviewYears ?? []);
-          if (savedState.userProfile) setUserProfile(savedState.userProfile);
-          if (savedState.auditEvents) setAuditEvents(savedState.auditEvents);
+          if (savedState.auditEvents) {
+            setAuditEvents((current) => mergeAuditEvents(savedState.auditEvents, current));
+          }
           setImportLogs(savedState.importLogs ?? []);
-          setSaveStatus("saved");
-          setSaveMessage("Loaded the saved table workspace from Firebase.");
+          setSaveStatus(pendingStudentSyncError ? "error" : "saved");
+          setSaveMessage(pendingStudentSyncError
+            ? `Loaded the workspace, but its pending SQL synchronization still needs attention. ${pendingStudentSyncError.message}`
+            : recoveredPendingStudentSync
+              ? "Loaded the workspace and completed its pending SQL synchronization."
+              : "Loaded the saved table workspace from Firebase.");
           return;
         }
 
@@ -364,7 +548,6 @@ export default function StudentEvaluationApp() {
           templates: assessmentTemplates,
           schoolYears: dashboardYears,
           lockedOverviewYears: [],
-          userProfile,
           auditEvents,
           importLogs: []
         };
@@ -373,7 +556,7 @@ export default function StudentEvaluationApp() {
         setTemplates(assessmentTemplates);
         setSchoolYears(dashboardYears);
         setLastSavedWorkspaceState(cleanState);
-        setDatabaseStudentNames([]);
+        setDatabaseStudentOptions([]);
         setOverviewChangedStudentIds(new Set());
         setLockedOverviewYears([]);
         setSaveStatus("saved");
@@ -382,6 +565,8 @@ export default function StudentEvaluationApp() {
         if (cancelled) return;
         setSaveStatus("error");
         setSaveMessage(error instanceof Error ? error.message : "Could not load saved students from Firebase.");
+      } finally {
+        if (!cancelled) setWorkspaceReadyForUid(authenticatedUid);
       }
     }
 
@@ -389,7 +574,7 @@ export default function StudentEvaluationApp() {
     return () => {
       cancelled = true;
     };
-  }, [authReady, authUser, organizationAccess]);
+  }, [authReady, authUser, organizationAccess, workspaceReadyForUid]);
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
@@ -403,6 +588,7 @@ export default function StudentEvaluationApp() {
   }, [saveStatus]);
 
   useEffect(() => {
+    if (!authUser || organizationAccess !== "active" || navigationReadyForUid !== authUser.uid) return;
     if (isAdmin) return;
     if (activeView !== "dashboard" && activeView !== "assessment" && activeView !== "profile") {
       setActiveView("dashboard");
@@ -410,7 +596,18 @@ export default function StudentEvaluationApp() {
     if (assessmentPageTab !== "entry") {
       setAssessmentPageTab("entry");
     }
-  }, [activeView, assessmentPageTab, isAdmin]);
+  }, [activeView, assessmentPageTab, authUser, isAdmin, navigationReadyForUid, organizationAccess]);
+
+  useEffect(() => {
+    if (organizationAccess !== "active" || isAdmin) return;
+    const currentSchoolYear = schoolYears[0];
+    if (currentSchoolYear && selectedOverviewYear !== currentSchoolYear) {
+      setSelectedOverviewYear(currentSchoolYear);
+    }
+    if (userProfile.grade && selectedOverviewGrade !== userProfile.grade) {
+      setSelectedOverviewGrade(userProfile.grade);
+    }
+  }, [isAdmin, organizationAccess, schoolYears, selectedOverviewGrade, selectedOverviewYear, userProfile.grade]);
 
   function markUnsaved(message = "You have unsaved table changes.") {
     setSaveStatus("dirty");
@@ -433,10 +630,11 @@ export default function StudentEvaluationApp() {
     setTemplates(lastSavedWorkspaceState.templates);
     setSchoolYears(lastSavedWorkspaceState.schoolYears);
     setLockedOverviewYears(lastSavedWorkspaceState.lockedOverviewYears ?? []);
-    if (lastSavedWorkspaceState.userProfile) setUserProfile(lastSavedWorkspaceState.userProfile);
-    if (lastSavedWorkspaceState.auditEvents) setAuditEvents(lastSavedWorkspaceState.auditEvents);
+    if (lastSavedWorkspaceState.auditEvents) {
+      setAuditEvents((current) => mergeAuditEvents(lastSavedWorkspaceState.auditEvents, current));
+    }
     setImportLogs(lastSavedWorkspaceState.importLogs ?? []);
-    setDatabaseStudentNames(uniqueStudentNames(lastSavedWorkspaceState.rows));
+    setDatabaseStudentOptions(buildStudentIdentityOptions(lastSavedWorkspaceState.rows, lastSavedWorkspaceState.placements));
     setOverviewDuplicateConflicts([]);
     setOverviewChangedStudentIds(new Set());
     setSaveStatus("saved");
@@ -466,12 +664,22 @@ export default function StudentEvaluationApp() {
     setAssessmentPageTab(tab);
   }
 
-  async function changeTeamMemberRole(memberId: string, role: UserRole) {
-    const updatedMember = await updateOrganizationMemberRole(memberId, role);
+  async function changeTeamMemberAccess(
+    memberId: string,
+    access: { role: UserRole; grade: string; homeroom: string }
+  ) {
+    const updatedMember = await updateOrganizationMemberAccess(memberId, access);
     setTeamMembers((current) =>
       current.map((member) => (member.id === updatedMember.id ? updatedMember : member))
     );
-    recordAudit("Changed team role", "Team", updatedMember.email, `Assigned ${updatedMember.role}.`);
+    recordAudit(
+      "Changed team access",
+      "Team",
+      updatedMember.email,
+      updatedMember.role === "Admin"
+        ? "Assigned Admin access."
+        : `Assigned ${updatedMember.role} to Grade ${updatedMember.grade || "-"}, HR ${updatedMember.homeroom || "-"}.`
+    );
   }
 
   async function deleteTeamMember(memberId: string) {
@@ -487,6 +695,7 @@ export default function StudentEvaluationApp() {
   async function saveTablesToFirebase() {
     setSaveStatus("saving");
     setSaveMessage("Saving table changes to Firebase...");
+    let workspaceSavedWithPendingSync: SavedWorkspaceState | null = null;
     try {
       let rowsForSave = orfRows;
       let placementsForSave = overviewPlacements;
@@ -520,37 +729,35 @@ export default function StudentEvaluationApp() {
         }
 
         setOverviewDuplicateConflicts([]);
-
-        const reconciled = reconcilePriorYearStudentPlacements(
-          rowsForSave,
-          placementsForSave,
-          selectedOverviewYear,
-          selectedOverviewGrade
-        );
-        rowsForSave = reconciled.rows;
-        placementsForSave = reconciled.placements;
       }
 
-      const workspaceState: SavedWorkspaceState = {
+      const pendingWorkspaceState: SavedWorkspaceState = {
         rows: rowsForSave,
         placements: placementsForSave,
         templates,
         schoolYears,
         lockedOverviewYears,
-        userProfile,
         auditEvents,
-        importLogs
+        importLogs,
+        pendingStudentSync: true
+      };
+      await savePrototypeWorkspaceState(pendingWorkspaceState);
+      workspaceSavedWithPendingSync = pendingWorkspaceState;
+      setLastSavedWorkspaceState(pendingWorkspaceState);
+      const result = await saveStudentsToDatabase(rowsForSave);
+      const workspaceState: SavedWorkspaceState = {
+        ...pendingWorkspaceState,
+        pendingStudentSync: false
       };
       await savePrototypeWorkspaceState(workspaceState);
-      const rowsToSync = studentRowsChangedSinceLastSave(rowsForSave, lastSavedWorkspaceState);
-      const result = rowsToSync.length ? await saveStudentsToDatabase(rowsToSync) : { createdCount: 0, updatedCount: 0 };
+      workspaceSavedWithPendingSync = null;
+      setLastSavedWorkspaceState(workspaceState);
       if (activeView === "profile" && authUser && userProfile.name && userProfile.name !== authUser.displayName) {
         await updateProfile(authUser, { displayName: userProfile.name });
       }
-      setLastSavedWorkspaceState(workspaceState);
       setOrfRows(rowsForSave);
       setOverviewPlacements(placementsForSave);
-      setDatabaseStudentNames(uniqueStudentNames(rowsForSave));
+      setDatabaseStudentOptions(buildStudentIdentityOptions(rowsForSave, placementsForSave));
       setOverviewChangedStudentIds(new Set());
       setSaveStatus("saved");
       setSaveMessage(
@@ -561,7 +768,11 @@ export default function StudentEvaluationApp() {
       recordAudit("Saved table", "Firebase Data Connect", "Student table", "Saved visible student rows to the SQL Student table.");
     } catch (error) {
       setSaveStatus("error");
-      setSaveMessage(error instanceof Error ? error.message : "Firebase save failed.");
+      setSaveMessage(
+        workspaceSavedWithPendingSync
+          ? `The workspace is saved, but SQL synchronization is still pending and will retry on reload. ${error instanceof Error ? error.message : "Firebase Data Connect failed."}`
+          : error instanceof Error ? error.message : "Firebase save failed."
+      );
     }
   }
 
@@ -764,12 +975,61 @@ export default function StudentEvaluationApp() {
     const nextYear = `${lastStart + 1}-${lastStart + 2}`;
     setSchoolYears((current) => [nextYear, ...current]);
     setSelectedOverviewYear(nextYear);
+    setOverviewStudentFilterId(null);
+    markUnsaved(`${nextYear} was added. Save to update Firebase.`);
     recordAudit("Created school year", "Overview", nextYear, "Created a new empty school year with no homeroom assignments.");
+  }
+
+  function deleteSchoolYear(yearToDelete: string) {
+    if (!isAdmin) return;
+    if (lockedOverviewYears.includes(yearToDelete)) {
+      window.alert(`Unlock ${yearToDelete} before deleting it.`);
+      return;
+    }
+    if (schoolYears.length <= 1) {
+      window.alert("At least one school year must remain.");
+      return;
+    }
+
+    const placementCount = overviewPlacements.filter((placement) => placement.schoolYear === yearToDelete).length;
+    const confirmed = window.confirm(
+      `Delete ${yearToDelete}? This permanently removes ${placementCount} student placement${placementCount === 1 ? "" : "s"} and all assessment values saved for that year. Student records and other school years will remain.`
+    );
+    if (!confirmed) return;
+
+    const result = deleteSchoolYearFromOverview({
+      rows: orfRows,
+      placements: overviewPlacements,
+      schoolYears,
+      lockedYears: lockedOverviewYears,
+      selectedYear: selectedOverviewYear,
+      yearToDelete
+    });
+    if (result.status !== "deleted") return;
+
+    setOrfRows(result.rows);
+    setOverviewPlacements(result.placements);
+    setDatabaseStudentOptions(buildStudentIdentityOptions(result.rows, result.placements));
+    setSchoolYears(result.schoolYears);
+    setLockedOverviewYears(result.lockedYears);
+    setSelectedOverviewYear(result.selectedYear);
+    setOverviewStudentFilterId(null);
+    setOverviewDuplicateConflicts([]);
+    setOverviewChangedStudentIds(new Set());
+    setOverviewDialog(null);
+    setImportLogs((current) => current.filter((log) => log.schoolYear !== yearToDelete));
+    markUnsaved(`${yearToDelete} was deleted. Save to update Firebase.`);
+    recordAudit(
+      "Deleted school year",
+      "Overview",
+      yearToDelete,
+      `Deleted the unlocked school year, ${placementCount} student placement${placementCount === 1 ? "" : "s"}, and its scoped assessment values.`
+    );
   }
 
   function addHomeroomWithStudents(homeroom: string, studentCount: number) {
     const trimmedHomeroom = homeroom.trim();
-    if (!trimmedHomeroom || studentCount < 1) return;
+    if (!trimmedHomeroom || !Number.isSafeInteger(studentCount) || studentCount < 1 || studentCount > 40) return;
 
     const createdRows = Array.from({ length: studentCount }, (_, index) =>
       hydrateOrfRow({
@@ -808,22 +1068,24 @@ export default function StudentEvaluationApp() {
 
   function moveStudent(studentId: string, homeroom: string) {
     const student = orfRows.find((row) => row.id === studentId);
-    const trimmedHomeroom = homeroom.trim();
-    if (!student || !trimmedHomeroom) return;
+    if (!student) return;
+    const result = moveStudentToExistingHomeroom({
+      placements: overviewPlacements,
+      studentId,
+      schoolYear: selectedOverviewYear,
+      grade: selectedOverviewGrade,
+      homeroom
+    });
+    if (result.status !== "moved") {
+      if (result.reason === "missing-homeroom") window.alert("Choose a homeroom that already exists in this grade.");
+      return;
+    }
 
-    setOverviewPlacements((current) =>
-      current.map((placement) =>
-        placement.studentId === studentId &&
-        placement.schoolYear === selectedOverviewYear &&
-        placement.grade === selectedOverviewGrade
-          ? { ...placement, homeroom: trimmedHomeroom }
-          : placement
-      )
-    );
+    setOverviewPlacements(result.placements);
     setOverviewDialog(null);
     setOverviewChangedStudentIds((current) => new Set([...current, studentId]));
     markUnsaved("Student moved. Save to keep the table changes.");
-    recordAudit("Moved student", "Overview placement", student.student, `Moved student to ${trimmedHomeroom}.`);
+    recordAudit("Moved student", "Overview placement", student.student, `Moved student to ${homeroom.trim()}.`);
   }
 
   function removeStudentFromHomeroom(studentId: string) {
@@ -839,6 +1101,7 @@ export default function StudentEvaluationApp() {
       )
     );
     setOverviewDialog(null);
+    setOverviewStudentFilterId((current) => (current === studentId ? null : current));
     setOverviewChangedStudentIds((current) => new Set([...current, studentId]));
     markUnsaved("Student removed from this homeroom. Save to keep the table changes.");
     if (student) {
@@ -849,6 +1112,36 @@ export default function StudentEvaluationApp() {
         "Removed student from the current homeroom while preserving assessment data."
       );
     }
+  }
+
+  function readdExistingStudent(placeholderId: string, existingStudentId: string) {
+    const existingStudent = orfRows.find((row) => row.id === existingStudentId);
+    const result = reassignPlaceholderToExistingStudent({
+      rows: orfRows,
+      placements: overviewPlacements,
+      placeholderId,
+      existingStudentId,
+      schoolYear: selectedOverviewYear,
+      grade: selectedOverviewGrade
+    });
+    if (result.status !== "reassigned") {
+      if (result.reason === "already-placed") {
+        window.alert(`${existingStudent?.student ?? "This student"} is already assigned in ${selectedOverviewYear}.`);
+      }
+      return;
+    }
+
+    setOrfRows(result.rows);
+    setOverviewPlacements(result.placements);
+    setOverviewDuplicateConflicts((current) => current.filter((conflict) => conflict.studentId !== placeholderId));
+    setOverviewChangedStudentIds((current) => new Set([...current, existingStudentId]));
+    markUnsaved("Existing student restored with prior assessment history. Save to update Firebase.");
+    recordAudit(
+      "Restored student placement",
+      "Overview placement",
+      existingStudent?.student ?? existingStudentId,
+      `Re-added the existing student to ${selectedOverviewYear}, Grade ${selectedOverviewGrade}, with prior assessment history intact.`
+    );
   }
 
   async function importOverviewSpreadsheet({ file, schoolYear, grade }: OverviewImportRequest): Promise<OverviewImportResult> {
@@ -870,6 +1163,7 @@ export default function StudentEvaluationApp() {
     const addedStudentIds: string[] = [];
     const addedPlacements: StudentPlacement[] = [];
     const updatedRows: ImportUpdatedRowSnapshot[] = [];
+    const validationErrors: string[] = [];
     let dataCellCount = 0;
     const nextRowsById = new Map(orfRows.map((row) => [row.id, row]));
 
@@ -905,6 +1199,17 @@ export default function StudentEvaluationApp() {
 
       importedStudent.values.forEach((cell) => {
         if (cell.value === "" || cell.value === null || typeof cell.value === "undefined") return;
+        const validation = validateAssessmentTableEdit(
+          nextRow,
+          cell.match.assessment,
+          cell.match.fieldName,
+          cell.value,
+          { schoolYear, grade }
+        );
+        if (!validation.valid) {
+          validationErrors.push(`row ${importedStudent.sourceRowNumber} (${importedStudent.studentName}): ${validation.error}`);
+          return;
+        }
         nextRow = updateAssessmentRowFromTableEdit(nextRow, cell.match.assessment, cell.match.fieldName, cell.value, {
           schoolYear,
           grade
@@ -926,6 +1231,12 @@ export default function StudentEvaluationApp() {
       });
     }
 
+    if (validationErrors.length) {
+      const preview = validationErrors.slice(0, 5).join(" ");
+      const remainder = validationErrors.length > 5 ? ` ${validationErrors.length - 5} more invalid value(s) were found.` : "";
+      throw new Error(`Import stopped before saving because ${validationErrors.length} value(s) are invalid. ${preview}${remainder}`);
+    }
+
     const nextRows = Array.from(nextRowsById.values());
     const nextPlacements = [...overviewPlacements, ...addedPlacements];
     const nextYears = schoolYears.includes(schoolYear) ? schoolYears : [schoolYear, ...schoolYears].sort(compareSchoolYears).reverse();
@@ -939,49 +1250,69 @@ export default function StudentEvaluationApp() {
       dataCellCount,
       duplicateNames: uniqueIds(duplicateNames),
       addedStudentIds,
+      addedRows: nextRows.filter((row) => addedStudentIds.includes(row.id)),
       addedPlacements,
       updatedRows
     };
-    const auditEvent = createAuditEvent(
-      "Imported spreadsheet",
-      "Overview import",
-      `${schoolYear} / Grade ${grade}`,
-      `Imported ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} from ${file.name}. ${duplicateNames.length} duplicate${duplicateNames.length === 1 ? "" : "s"} skipped.`,
-      { importLogId: importId }
-    );
     const nextImportLogs = [importLog, ...importLogs];
-    const nextAuditEvents = [auditEvent, ...auditEvents];
-    const workspaceState: SavedWorkspaceState = {
+    const persistedWorkspaceState: SavedWorkspaceState = {
       rows: nextRows,
       placements: nextPlacements,
       templates,
       schoolYears: nextYears,
       lockedOverviewYears,
-      userProfile,
-      auditEvents: nextAuditEvents,
-      importLogs: nextImportLogs
+      auditEvents,
+      importLogs: nextImportLogs,
+      pendingStudentSync: true
     };
 
-    await savePrototypeWorkspaceState(workspaceState);
+    await savePrototypeWorkspaceState(persistedWorkspaceState);
+    let sqlSyncPending = false;
+    let sqlSyncError = "";
+    let committedWorkspaceState = persistedWorkspaceState;
     try {
-      if (addedStudentIds.length || updatedRows.length) await saveStudentsToDatabase(nextRows);
+      await saveStudentsToDatabase(nextRows);
+      const synchronizedWorkspaceState = { ...persistedWorkspaceState, pendingStudentSync: false };
+      await savePrototypeWorkspaceState(synchronizedWorkspaceState);
+      committedWorkspaceState = synchronizedWorkspaceState;
     } catch (error) {
-      if (!isStudentNumberConstraintError(error)) throw error;
-      if (!duplicateNames.length) throw new Error("Some imported students already exist in Firebase. Review duplicate student names and try again.");
+      sqlSyncPending = true;
+      sqlSyncError = error instanceof Error ? error.message : "Firebase Data Connect could not be synchronized.";
     }
+    const auditEvent = createAuditEvent(
+      "Imported spreadsheet",
+      "Overview import",
+      `${schoolYear} / Grade ${grade}`,
+      sqlSyncPending
+        ? `Saved ${addedPlacements.length} imported student placement${addedPlacements.length === 1 ? "" : "s"} from ${file.name}; SQL synchronization is pending and will retry on reload.`
+        : `Imported ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} from ${file.name}. ${duplicateNames.length} duplicate${duplicateNames.length === 1 ? "" : "s"} skipped.`,
+      { importLogId: importId, id: `audit-import-${importId}` }
+    );
+    const savedAuditEvent = await persistAuditEvent(auditEvent);
+    const nextAuditEvents = savedAuditEvent ? mergeAuditEvents([savedAuditEvent], auditEvents) : auditEvents;
+    const workspaceState: SavedWorkspaceState = {
+      ...committedWorkspaceState,
+      auditEvents: nextAuditEvents
+    };
     setOrfRows(nextRows);
     setOverviewPlacements(nextPlacements);
     setSchoolYears(nextYears);
     setSelectedOverviewYear(schoolYear);
     setSelectedOverviewGrade(grade);
     setImportLogs(nextImportLogs);
-    setAuditEvents(nextAuditEvents);
+    setAuditEvents((current) => mergeAuditEvents(nextAuditEvents, current));
     setLastSavedWorkspaceState(workspaceState);
-    setDatabaseStudentNames(uniqueStudentNames(nextRows));
+    setDatabaseStudentOptions(buildStudentIdentityOptions(nextRows, nextPlacements));
     setOverviewChangedStudentIds(new Set());
     setOverviewDuplicateConflicts([]);
-    setSaveStatus("saved");
-    setSaveMessage(`Import complete. ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} imported and saved to Firebase.`);
+    setSaveStatus(sqlSyncPending ? "error" : "saved");
+    setSaveMessage(
+      sqlSyncPending
+        ? `Import saved to the workspace, but SQL synchronization is pending and will retry on reload. ${sqlSyncError}`
+        : savedAuditEvent
+        ? `Import complete. ${addedPlacements.length} student${addedPlacements.length === 1 ? "" : "s"} imported and saved to Firebase.`
+        : `Import complete, but the shared audit entry could not be saved. Retry the audit from the Audit Log before relying on the record.`
+    );
 
     return {
       importLogId: importId,
@@ -990,65 +1321,121 @@ export default function StudentEvaluationApp() {
       grade,
       importedCount: addedPlacements.length,
       dataCellCount,
+      auditSaved: Boolean(savedAuditEvent),
+      sqlSyncPending,
       duplicateNames: uniqueIds(duplicateNames)
     };
   }
 
-  async function revertImport(importLogId: string) {
+  async function revertImport(importLogId: string): Promise<ImportRevertOutcome> {
+    if (revertingImportIdsRef.current.has(importLogId)) return "unavailable";
     const importLog = importLogs.find((log) => log.id === importLogId);
-    if (!importLog || importLog.revertedAt) return;
-    if (!window.confirm(`Revert the import from ${importLog.fileName}? This will remove imported placements and restore changed assessment values.`)) return;
+    if (!importLog || importLog.revertedAt) return "unavailable";
+    if (!window.confirm(`Revert the import from ${importLog.fileName}? This will remove imported placements and restore changed assessment values.`)) return "cancelled";
 
-    const addedStudentIds = new Set(importLog.addedStudentIds);
-    const previousRowsById = new Map(importLog.updatedRows.map((snapshot) => [snapshot.studentId, snapshot.previousRow]));
-    const nextRows = orfRows
-      .filter((row) => !addedStudentIds.has(row.id))
-      .map((row) => previousRowsById.get(row.id) ?? row);
-    const nextPlacements = overviewPlacements.filter(
-      (placement) =>
-        !importLog.addedPlacements.some(
-          (added) =>
-            added.studentId === placement.studentId &&
-            added.schoolYear === placement.schoolYear &&
-            added.grade === placement.grade &&
-            added.homeroom === placement.homeroom
-        )
-    );
-    const revertedAt = new Date().toISOString();
-    const nextImportLogs = importLogs.map((log) => (log.id === importLogId ? { ...log, revertedAt } : log));
-    const revertAuditEvent = createAuditEvent(
-      "Reverted import",
-      "Overview import",
-      `${importLog.schoolYear} / Grade ${importLog.grade}`,
-      `Reverted imported students and assessment values from ${importLog.fileName}.`,
-      { importLogId }
-    );
-    const nextAuditEvents = auditEvents
-      .map((event) => (event.importLogId === importLogId ? { ...event, revertedAt } : event))
-      .concat(revertAuditEvent)
-      .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
-    const workspaceState: SavedWorkspaceState = {
-      rows: nextRows,
-      placements: nextPlacements,
-      templates,
-      schoolYears,
-      lockedOverviewYears,
-      userProfile,
-      auditEvents: nextAuditEvents,
-      importLogs: nextImportLogs
-    };
+    revertingImportIdsRef.current.add(importLogId);
+    try {
+      if (importLog.addedStudentIds.length) {
+        throw new Error(
+          "This import created new SQL student records, so it cannot be safely reverted yet. No data was changed. An Admin must use the planned transactional Data Connect rollback after confirming the students have no later enrollments, notes, results, files, or reports."
+        );
+      }
 
-    await savePrototypeWorkspaceState(workspaceState);
-    await saveStudentsToDatabase(nextRows);
-    setOrfRows(nextRows);
-    setOverviewPlacements(nextPlacements);
-    setImportLogs(nextImportLogs);
-    setAuditEvents(nextAuditEvents);
-    setLastSavedWorkspaceState(workspaceState);
-    setDatabaseStudentNames(uniqueStudentNames(nextRows));
-    setOverviewChangedStudentIds(new Set());
-    setSaveStatus("saved");
-    setSaveMessage(`Reverted import from ${importLog.fileName} and saved the rollback to Firebase.`);
+      const currentRowsById = new Map(orfRows.map((row) => [row.id, row]));
+      const changedAfterImport = importLog.updatedRows.filter((snapshot) => {
+        const currentRow = currentRowsById.get(snapshot.studentId);
+        return !currentRow || JSON.stringify(currentRow) !== JSON.stringify(snapshot.nextRow);
+      });
+      if (changedAfterImport.length) {
+        throw new Error(
+          `This import cannot be reverted because ${changedAfterImport.length} affected student record${changedAfterImport.length === 1 ? " has" : "s have"} changed since the import. No data was changed.`
+        );
+      }
+
+      const addedStudentIds = new Set(importLog.addedStudentIds);
+      const previousRowsById = new Map(importLog.updatedRows.map((snapshot) => [snapshot.studentId, snapshot.previousRow]));
+      const nextRows = orfRows
+        .filter((row) => !addedStudentIds.has(row.id))
+        .map((row) => previousRowsById.get(row.id) ?? row);
+      const nextPlacements = overviewPlacements.filter(
+        (placement) =>
+          !importLog.addedPlacements.some(
+            (added) =>
+              added.studentId === placement.studentId &&
+              added.schoolYear === placement.schoolYear &&
+              added.grade === placement.grade &&
+              added.homeroom === placement.homeroom
+          )
+      );
+      const revertedAt = new Date().toISOString();
+      const nextImportLogs = importLogs.map((log) => (log.id === importLogId ? { ...log, revertedAt } : log));
+      const revertAuditEvent = createAuditEvent(
+        "Reverted import",
+        "Overview import",
+        `${importLog.schoolYear} / Grade ${importLog.grade}`,
+        `Reverted imported students and assessment values from ${importLog.fileName}.`,
+        { importLogId, id: `audit-revert-${importLogId}` }
+      );
+      const persistedWorkspaceState: SavedWorkspaceState = {
+        rows: nextRows,
+        placements: nextPlacements,
+        templates,
+        schoolYears,
+        lockedOverviewYears,
+        auditEvents,
+        importLogs: nextImportLogs
+      };
+
+      await savePrototypeWorkspaceState(persistedWorkspaceState);
+      try {
+        await saveStudentsToDatabase(nextRows);
+      } catch (error) {
+        try {
+          await savePrototypeWorkspaceState({
+            rows: orfRows,
+            placements: overviewPlacements,
+            templates,
+            schoolYears,
+            lockedOverviewYears,
+            auditEvents,
+            importLogs
+          });
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            "Rollback failed and the previous workspace could not be restored. An administrator must reconcile Firebase Data Connect before another rollback attempt."
+          );
+        }
+        throw new Error(
+          `Rollback was not completed because Firebase Data Connect could not be synchronized. The workspace was restored; press Save to reconcile SQL before retrying. ${error instanceof Error ? error.message : ""}`.trim()
+        );
+      }
+      const savedAuditEvent = await persistAuditEvent(revertAuditEvent);
+      const nextAuditEvents = mergeAuditEvents(
+        auditEvents.map((event) => (event.importLogId === importLogId ? { ...event, revertedAt } : event)),
+        savedAuditEvent ? [savedAuditEvent] : []
+      );
+      const workspaceState: SavedWorkspaceState = {
+        ...persistedWorkspaceState,
+        auditEvents: nextAuditEvents
+      };
+      setOrfRows(nextRows);
+      setOverviewPlacements(nextPlacements);
+      setImportLogs(nextImportLogs);
+      setAuditEvents((current) => mergeAuditEvents(nextAuditEvents, current));
+      setLastSavedWorkspaceState(workspaceState);
+      setDatabaseStudentOptions(buildStudentIdentityOptions(nextRows, nextPlacements));
+      setOverviewChangedStudentIds(new Set());
+      setSaveStatus("saved");
+      setSaveMessage(
+        savedAuditEvent
+          ? `Reverted import from ${importLog.fileName} and saved the rollback to Firebase.`
+          : `Import data was reverted, but the shared audit entry could not be saved. Retry the audit before relying on the record.`
+      );
+      return savedAuditEvent ? "reverted" : "reverted-audit-pending";
+    } finally {
+      revertingImportIdsRef.current.delete(importLogId);
+    }
   }
 
   function createAuditEvent(
@@ -1056,27 +1443,47 @@ export default function StudentEvaluationApp() {
     entityType: string,
     entityLabel: string,
     description: string,
-    options?: { importLogId?: string }
+    options?: { importLogId?: string; id?: string }
   ): AppAuditEvent {
     const createdAt = new Date().toISOString();
-    return {
-      id: `audit-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    const event: AppAuditEvent = {
+      id: options?.id ?? newAuditEventId(),
       eventType,
       entityType,
       entityLabel,
       description,
       createdAt,
-      actor: "VP workspace",
-      importLogId: options?.importLogId
+      actor: authenticatedActorName(authUser),
+      ...(authUser?.uid ? { actorUid: authUser.uid } : {}),
+      ...(authUser?.email ? { actorEmail: authUser.email } : {}),
+      ...(options?.importLogId ? { importLogId: options.importLogId } : {})
     };
+
+    return event;
   }
 
-  function recordAudit(eventType: string, entityType: string, entityLabel: string, description: string, options?: { importLogId?: string }) {
+  async function persistAuditEvent(event: AppAuditEvent) {
+    try {
+      const savedEvent = await recordOrganizationAuditEvent({
+      id: event.id,
+        eventType: event.eventType,
+        entityType: event.entityType,
+        entityLabel: event.entityLabel,
+        description: event.description,
+        ...(event.importLogId ? { importLogId: event.importLogId } : {})
+      });
+      setAuditEvents((current) => mergeAuditEvents(current, [savedEvent]));
+      return savedEvent;
+    } catch (error) {
+      console.error("Audit event could not be saved to Firestore.", error);
+      return null;
+    }
+  }
+
+  function recordAudit(eventType: string, entityType: string, entityLabel: string, description: string, options?: { importLogId?: string; id?: string }) {
     const event = createAuditEvent(eventType, entityType, entityLabel, description, options);
-    setAuditEvents((current) => [
-      event,
-      ...current
-    ]);
+    setAuditEvents((current) => mergeAuditEvents([event], current));
+    void persistAuditEvent(event);
     return event.id;
   }
 
@@ -1098,6 +1505,18 @@ export default function StudentEvaluationApp() {
 
   if (organizationAccess === "uninvited") {
     return <PendingInviteScreen email={authUser.email ?? ""} onSignOut={() => signOut(getAuth(firebaseApp))} />;
+  }
+
+  if (organizationAccess !== "active" || navigationReadyForUid !== authUser.uid) {
+    return (
+      <main className="auth-shell">
+        <section className="auth-card panel">
+          <p className="eyebrow">Student Evaluations</p>
+          <h1>Restoring workspace</h1>
+          <p>Loading your last authorized tab.</p>
+        </section>
+      </main>
+    );
   }
 
   const builderScrollMode = activeView === "assessment" && assessmentPageTab === "builder";
@@ -1236,6 +1655,8 @@ export default function StudentEvaluationApp() {
                 selectedGrade={selectedOverviewGrade}
                 onYearChange={setSelectedOverviewYear}
                 onGradeChange={setSelectedOverviewGrade}
+                scopeLocked={!isAdmin}
+                assignedHomeroom={userProfile.homeroom}
                 openNotes={setActiveNoteStudentId}
                 recordAudit={recordAudit}
                 saveStatus={saveStatus}
@@ -1257,15 +1678,31 @@ export default function StudentEvaluationApp() {
             selectedGrade={selectedOverviewGrade}
             homerooms={overviewHomerooms}
             locked={lockedOverviewYears.includes(selectedOverviewYear)}
-            onYearChange={setSelectedOverviewYear}
-            onGradeChange={setSelectedOverviewGrade}
+            onYearChange={(year) => {
+              setSelectedOverviewYear(year);
+              setOverviewStudentFilterId(null);
+            }}
+            onGradeChange={(grade) => {
+              setSelectedOverviewGrade(grade);
+              setOverviewStudentFilterId(null);
+            }}
             onAddYear={addSchoolYear}
+            onDeleteYear={() => deleteSchoolYear(selectedOverviewYear)}
             onOpenImport={() => setOverviewDialog({ type: "import" })}
             onOpenAdd={() => setOverviewDialog({ type: "add" })}
             onMoveStudent={(studentId) => setOverviewDialog({ type: "move", studentId })}
             onDeleteStudent={(studentId) => setOverviewDialog({ type: "delete", studentId })}
             duplicateConflicts={overviewDuplicateConflicts}
-            studentNameSuggestions={databaseStudentNames}
+            studentOptions={databaseStudentOptions}
+            studentSearchOptions={overviewStudentSearchOptions}
+            selectedStudentId={overviewStudentFilterId}
+            onSelectExistingStudent={readdExistingStudent}
+            onStudentSearchSelect={(option) => {
+              setSelectedOverviewYear(option.schoolYear);
+              setSelectedOverviewGrade(option.grade);
+              setOverviewStudentFilterId(option.studentId);
+            }}
+            onClearStudentSearch={() => setOverviewStudentFilterId(null)}
             onStudentNameChange={(studentId, studentName) => {
               setOrfRows((current) =>
                 current.map((row) => (row.id === studentId ? { ...row, student: studentName } : row))
@@ -1301,7 +1738,7 @@ export default function StudentEvaluationApp() {
             }}
           />
         ) : activeView === "dashboard" ? (
-          <Dashboard rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} />
+          <Dashboard rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
         ) : activeView === "report" ? (
           <StudentReport rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} recordAudit={recordAudit} />
         ) : activeView === "files" ? (
@@ -1315,7 +1752,8 @@ export default function StudentEvaluationApp() {
             setProfile={setUserProfile}
             currentRole={currentUserRole}
             teamMembers={teamMembers}
-            onRoleChange={changeTeamMemberRole}
+            onAccessChange={changeTeamMemberAccess}
+            assignmentHomerooms={teamAssignmentHomerooms(overviewPlacements, schoolYears[0])}
             onDeleteMember={deleteTeamMember}
             events={auditEvents}
             importLogs={importLogs}
@@ -1328,7 +1766,7 @@ export default function StudentEvaluationApp() {
             onSave={saveTablesToFirebase}
           />
         ) : (
-          <Dashboard rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} />
+          <Dashboard rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
         )}
       </section>
 
@@ -1364,7 +1802,7 @@ export default function StudentEvaluationApp() {
 
       {overviewDialog?.type === "move" ? (
         <MoveStudentModal
-          student={orfRows.find((row) => row.id === overviewDialog.studentId) ?? null}
+          student={activeOverviewRows.find((row) => row.id === overviewDialog.studentId) ?? null}
           homerooms={overviewHomerooms}
           onClose={() => setOverviewDialog(null)}
           onMove={(homeroom) => moveStudent(overviewDialog.studentId, homeroom)}
@@ -1406,13 +1844,6 @@ type StudentNote = {
   createdAt: string;
 };
 
-type StudentPlacement = {
-  studentId: string;
-  schoolYear: string;
-  grade: string;
-  homeroom: string;
-};
-
 type DuplicateStudentNameConflict = {
   studentId: string;
   name: string;
@@ -1439,9 +1870,10 @@ type ImportChangeLog = {
   createdAt: string;
   importedCount: number;
   dataCellCount: number;
-  duplicateNames: string[];
-  addedStudentIds: string[];
-  addedPlacements: StudentPlacement[];
+      duplicateNames: string[];
+      addedStudentIds: string[];
+      addedRows?: OrfResultRow[];
+      addedPlacements: StudentPlacement[];
   updatedRows: ImportUpdatedRowSnapshot[];
   revertedAt?: string;
 };
@@ -1459,6 +1891,8 @@ type OverviewImportResult = {
   grade: string;
   importedCount: number;
   dataCellCount: number;
+  auditSaved: boolean;
+  sqlSyncPending: boolean;
   duplicateNames: string[];
 };
 
@@ -1466,6 +1900,7 @@ type SavedWorkspaceState = WorkspaceStudentSnapshot & {
   templates: AssessmentTemplate[];
   schoolYears: string[];
   lockedOverviewYears?: string[];
+  pendingStudentSync?: boolean;
   userProfile?: {
     name: string;
     email: string;
@@ -1484,18 +1919,6 @@ type UploadedReport = {
   fileName: string;
   fileSize: number;
   storagePath: string;
-};
-
-type AppAuditEvent = {
-  id: string;
-  eventType: string;
-  entityType: string;
-  entityLabel: string;
-  description: string;
-  createdAt: string;
-  actor: string;
-  importLogId?: string;
-  revertedAt?: string;
 };
 
 function AuthScreen() {
@@ -2280,6 +2703,8 @@ function InlineEntryTable({
   selectedGrade,
   onYearChange,
   onGradeChange,
+  scopeLocked,
+  assignedHomeroom,
   openNotes,
   recordAudit,
   saveStatus,
@@ -2298,6 +2723,8 @@ function InlineEntryTable({
   selectedGrade: string;
   onYearChange: (year: string) => void;
   onGradeChange: (grade: string) => void;
+  scopeLocked: boolean;
+  assignedHomeroom: string;
   openNotes: (studentId: string) => void;
   recordAudit: RecordAudit;
   saveStatus: SaveStatus;
@@ -2315,27 +2742,6 @@ function InlineEntryTable({
   const scaleSummaries = useMemo(() => scaleSummariesForAssessment(selected), [selected]);
   const [scalePopupOpen, setScalePopupOpen] = useState(false);
   const [defaultValueTarget, setDefaultValueTarget] = useState<DefaultValueTarget | null>(null);
-  const commitScaleCodeValue = useCallback(
-    (rowId: string, fieldName: string, nextValue: string | null) => {
-      const sourceRow = rows.find((row) => row.id === rowId);
-      if (!sourceRow) return;
-      const previousValue = buildEntryRows([sourceRow], selected, assessmentContext)[0]?.[fieldName] ?? null;
-      if (previousValue === nextValue) return;
-      recordAudit(
-        "Edited score",
-        "Assessment result",
-        `${sourceRow.student} / ${fieldName}`,
-        `Changed ${fieldName} from ${previousValue ?? "-"} to ${nextValue ?? "-"}.`
-      );
-      markUnsaved("Assessment table changed. Save to keep the table changes.");
-      setRows((current) =>
-        current.map((row) =>
-          row.id === rowId ? updateAssessmentRowFromTableEdit(row, selected, fieldName, nextValue, assessmentContext) : row
-        )
-      );
-    },
-    [assessmentContext, markUnsaved, recordAudit, rows, selected, setRows]
-  );
   const openDefaultValuePopup = useCallback((target: DefaultValueTarget) => {
     setDefaultValueTarget(target);
   }, []);
@@ -2347,14 +2753,22 @@ function InlineEntryTable({
       ...selected.rounds.map((round) => ({
         headerName: round.label,
         headerStyle: roundHeaderStyle(round),
-        children: columnsForRound(selected, round, [], [], commitScaleCodeValue, openDefaultValuePopup)
+        children: columnsForRound(selected, round, [], [], undefined, openDefaultValuePopup, assessmentContext)
       }))
     ],
-    [commitScaleCodeValue, notes, openDefaultValuePopup, openNotes, selected]
+    [assessmentContext, notes, openDefaultValuePopup, openNotes, selected]
   );
 
-  function applyDefaultValue(target: DefaultValueTarget, rawValue: string) {
-    const nextValue = normalizedDefaultFieldValue(target.field, rawValue, target.scaleCodes);
+  function applyDefaultValue(target: DefaultValueTarget, rawValue: string): string | null {
+    const validation = validateDefaultFieldValue(target.field, rawValue, target.scaleCodes);
+    if (!validation.valid) return validation.error;
+    const nextValue = validation.value;
+    const invalidRow = rows
+      .map((row) => ({ row, validation: validateAssessmentTableEdit(row, selected, target.fieldName, nextValue, assessmentContext) }))
+      .find((result) => !result.validation.valid);
+    if (invalidRow && !invalidRow.validation.valid) {
+      return `${invalidRow.row.student}: ${invalidRow.validation.error}`;
+    }
     const visibleRowIds = new Set(rows.map((row) => row.id));
     setRows((current) =>
       current.map((row) =>
@@ -2371,11 +2785,17 @@ function InlineEntryTable({
     );
     markUnsaved("Assessment table changed. Save to keep the table changes.");
     setDefaultValueTarget(null);
+    return null;
   }
 
   function onCellValueChanged(event: CellValueChangedEvent<EntryRow>) {
     const fieldName = event.column.getColId();
     if (!event.data || !fieldName || event.oldValue === event.newValue) return;
+    const sourceRow = rows.find((row) => row.id === event.data?.id);
+    if (!sourceRow) return;
+    const updatedRow = updateAssessmentRowFromTableEdit(sourceRow, selected, fieldName, event.newValue, assessmentContext);
+    if (updatedRow === sourceRow) return;
+
     recordAudit(
       "Edited score",
       "Assessment result",
@@ -2383,26 +2803,9 @@ function InlineEntryTable({
       `Changed ${fieldName} from ${event.oldValue ?? "-"} to ${event.newValue ?? "-"}.`
     );
     markUnsaved("Assessment table changed. Save to keep the table changes.");
-
-    const sourceRow = rows.find((row) => row.id === event.data?.id);
-    if (sourceRow) {
-      const updatedRow = updateAssessmentRowFromTableEdit(sourceRow, selected, fieldName, event.newValue, assessmentContext);
-      event.node.setData(buildEntryRows([updatedRow], selected, assessmentContext)[0]);
-      event.api.refreshCells({ rowNodes: [event.node], force: true });
-    }
     setRows((current) =>
-      current.map((row) =>
-        row.id === event.data?.id
-          ? updateAssessmentRowFromTableEdit(row, selected, fieldName, event.newValue, assessmentContext)
-          : row
-      )
+      current.map((row) => (row.id === sourceRow.id ? updatedRow : row))
     );
-  }
-
-  function onCellFocused(event: CellFocusedEvent<EntryRow>) {
-    const colId = typeof event.column === "string" ? event.column : event.column?.getColId();
-    if (typeof event.rowIndex !== "number" || !colId) return;
-    focusScaleCodeInputInCell(event.rowIndex, colId);
   }
 
   return (
@@ -2424,7 +2827,7 @@ function InlineEntryTable({
           </button>
           <label>
             Year
-            <select value={selectedYear} onChange={(event) => onYearChange(event.target.value)}>
+            <select disabled={scopeLocked} value={selectedYear} onChange={(event) => onYearChange(event.target.value)}>
               {schoolYears.map((year) => (
                 <option key={year} value={year}>
                   {year}
@@ -2434,7 +2837,7 @@ function InlineEntryTable({
           </label>
           <label>
             Grade
-            <select value={selectedGrade} onChange={(event) => onGradeChange(event.target.value)}>
+            <select disabled={scopeLocked} value={selectedGrade} onChange={(event) => onGradeChange(event.target.value)}>
               {["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((grade) => (
                 <option key={grade} value={grade}>
                   Grade {grade}
@@ -2442,6 +2845,7 @@ function InlineEntryTable({
               ))}
             </select>
           </label>
+          {scopeLocked ? <span className="entry-scope-note">Assigned HR: {assignedHomeroom || "Not assigned"}</span> : null}
           <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
             {fullScreen ? "Exit full screen" : "Full screen"}
           </button>
@@ -2478,10 +2882,9 @@ function InlineEntryTable({
             filter: false
           }}
           getRowId={(params) => params.data.id}
-          onCellFocused={onCellFocused}
           onCellValueChanged={onCellValueChanged}
+          invalidEditValueMode="revert"
           suppressColumnVirtualisation
-          tabToNextCell={tabToNextAssessmentCell}
           stopEditingWhenCellsLoseFocus
         />
       </div>
@@ -2555,10 +2958,11 @@ function DefaultValuePopup({
   onClose
 }: {
   target: DefaultValueTarget;
-  onApply: (target: DefaultValueTarget, value: string) => void;
+  onApply: (target: DefaultValueTarget, value: string) => string | null;
   onClose: () => void;
 }) {
   const [value, setValue] = useState(target.scaleCodes[0] ?? "");
+  const [validationError, setValidationError] = useState("");
   const inputType = target.field.dataType === "integer" || target.field.dataType === "percentage" ? "number" : target.field.dataType === "date" ? "date" : "text";
 
   return (
@@ -2587,15 +2991,32 @@ function DefaultValuePopup({
               ))}
             </select>
           ) : (
-            <input autoFocus type={inputType} value={value} onChange={(event) => setValue(event.target.value)} />
+            <input
+              autoFocus
+              max={target.field.validationConfig?.max ?? (target.field.dataType === "percentage" ? 100 : undefined)}
+              min={target.field.validationConfig?.min ?? (inputType === "number" ? 0 : undefined)}
+              step={target.field.dataType === "integer" ? 1 : target.field.dataType === "percentage" ? "any" : undefined}
+              type={inputType}
+              value={value}
+              onChange={(event) => {
+                setValue(event.target.value);
+                setValidationError("");
+              }}
+            />
           )}
         </label>
+
+        {validationError ? <p className="form-error" role="alert">{validationError}</p> : null}
 
         <div className="modal-actions">
           <button className="small-action ghost" onClick={onClose} type="button">
             Cancel
           </button>
-          <button className="primary-action" onClick={() => onApply(target, value)} type="button">
+          <button
+            className="primary-action"
+            onClick={() => setValidationError(onApply(target, value) ?? "")}
+            type="button"
+          >
             Apply to all rows
           </button>
         </div>
@@ -2616,12 +3037,18 @@ function VpOverview({
   onYearChange,
   onGradeChange,
   onAddYear,
+  onDeleteYear,
   onOpenImport,
   onOpenAdd,
   onMoveStudent,
   onDeleteStudent,
   duplicateConflicts,
-  studentNameSuggestions,
+  studentOptions,
+  studentSearchOptions,
+  selectedStudentId,
+  onSelectExistingStudent,
+  onStudentSearchSelect,
+  onClearStudentSearch,
   onStudentNameChange,
   openNotes,
   saveStatus,
@@ -2642,12 +3069,18 @@ function VpOverview({
   onYearChange: (year: string) => void;
   onGradeChange: (grade: string) => void;
   onAddYear: () => void;
+  onDeleteYear: () => void;
   onOpenImport: () => void;
   onOpenAdd: () => void;
   onMoveStudent: (studentId: string) => void;
   onDeleteStudent: (studentId: string) => void;
   duplicateConflicts: DuplicateStudentNameConflict[];
-  studentNameSuggestions: string[];
+  studentOptions: StudentIdentityOption[];
+  studentSearchOptions: StudentSearchOption[];
+  selectedStudentId: string | null;
+  onSelectExistingStudent: (placeholderId: string, existingStudentId: string) => void;
+  onStudentSearchSelect: (option: StudentSearchOption) => void;
+  onClearStudentSearch: () => void;
   onStudentNameChange: (studentId: string, studentName: string) => void;
   openNotes: (studentId: string) => void;
   saveStatus: SaveStatus;
@@ -2662,15 +3095,36 @@ function VpOverview({
   const [hiddenRoundIds, setHiddenRoundIds] = useState<string[]>([]);
   const [hiddenSectionIds, setHiddenSectionIds] = useState<string[]>([]);
   const [hiddenFieldIds, setHiddenFieldIds] = useState<string[]>([]);
+  const [studentSearchText, setStudentSearchText] = useState("");
+  const [studentSearchOpen, setStudentSearchOpen] = useState(false);
   const duplicateStudentIds = useMemo(() => duplicateConflicts.map((conflict) => conflict.studentId), [duplicateConflicts]);
+  const matchingStudentOptions = useMemo(() => {
+    const query = normalizeStudentName(studentSearchText);
+    return studentSearchOptions
+      .filter((option) => !query || normalizeStudentName(option.name).includes(query))
+      .slice(0, 8);
+  }, [studentSearchOptions, studentSearchText]);
   const rowData = useMemo(
-    () => buildOverviewRows(rows, templates, { schoolYear: selectedYear, grade: selectedGrade }),
-    [rows, selectedGrade, selectedYear, templates]
+    () =>
+      buildOverviewRows(
+        selectedStudentId ? rows.filter((row) => row.id === selectedStudentId) : rows,
+        templates,
+        { schoolYear: selectedYear, grade: selectedGrade, cohortRows: rows }
+      ),
+    [rows, selectedGrade, selectedStudentId, selectedYear, templates]
   );
   const columnDefs = useMemo<ColDef<EntryRow>[]>(
     () => [
-      { field: "homeroom", headerName: "HR", pinned: "left", width: 90, filter: true },
-      studentActionColumn(onMoveStudent, onDeleteStudent, onStudentNameChange, locked, duplicateStudentIds, studentNameSuggestions),
+      { field: "homeroom", headerName: "HR", pinned: "left", width: 90, filter: true, editable: false, cellClass: "read-only-grid-cell" },
+      studentActionColumn(
+        onMoveStudent,
+        onDeleteStudent,
+        onStudentNameChange,
+        onSelectExistingStudent,
+        locked,
+        duplicateStudentIds,
+        studentOptions
+      ),
       noteColumn(notes, openNotes),
       ...templates
         .filter((template) => !hiddenAssessmentIds.includes(template.id))
@@ -2695,9 +3149,10 @@ function VpOverview({
       notes,
       onDeleteStudent,
       onMoveStudent,
+      onSelectExistingStudent,
       onStudentNameChange,
       openNotes,
-      studentNameSuggestions,
+      studentOptions,
       templates
     ]
   );
@@ -2710,6 +3165,21 @@ function VpOverview({
     if (window.confirm(message)) {
       onLockChange(nextLocked);
     }
+  }
+
+  function clearStudentSearch() {
+    setStudentSearchText("");
+    setStudentSearchOpen(false);
+    onClearStudentSearch();
+  }
+
+  function selectStudentSearchOption(option: StudentSearchOption) {
+    if (saveStatus === "dirty" && !window.confirm("You have unsaved table changes. Navigate to another student without saving?")) {
+      return;
+    }
+    setStudentSearchText(option.name);
+    setStudentSearchOpen(false);
+    onStudentSearchSelect(option);
   }
 
   function onCellValueChanged(event: CellValueChangedEvent<EntryRow>) {
@@ -2735,6 +3205,7 @@ function VpOverview({
                   event.target.value = selectedYear;
                   return;
                 }
+                clearStudentSearch();
                 onYearChange(event.target.value);
               }}
             >
@@ -2750,6 +3221,16 @@ function VpOverview({
             Add Year
           </button>
 
+          <button
+            className="small-action danger-outline-action"
+            disabled={locked || schoolYears.length <= 1}
+            onClick={onDeleteYear}
+            title={locked ? `Unlock ${selectedYear} before deleting it` : schoolYears.length <= 1 ? "At least one school year must remain" : `Delete ${selectedYear}`}
+            type="button"
+          >
+            Delete Year
+          </button>
+
           <label>
             Grade
             <select
@@ -2759,6 +3240,7 @@ function VpOverview({
                   event.target.value = selectedGrade;
                   return;
                 }
+                clearStudentSearch();
                 onGradeChange(event.target.value);
               }}
             >
@@ -2774,10 +3256,6 @@ function VpOverview({
             Add homeroom / students
           </button>
 
-          <button className="small-action" onClick={() => setOptionsOpen(true)} type="button">
-            Options
-          </button>
-
           <button className={locked ? "small-action muted-action" : "small-action"} onClick={toggleLock} type="button">
             {locked ? "Unlock" : "Lock"}
           </button>
@@ -2785,13 +3263,72 @@ function VpOverview({
           <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
             {fullScreen ? "Exit full screen" : "Full screen"}
           </button>
+
+          <button className="small-action overview-options-action" onClick={() => setOptionsOpen(true)} type="button">
+            Options
+          </button>
+        </div>
+
+        <div className="overview-student-search-row">
+          <label className="overview-student-search">
+            Find student
+            <input
+              aria-autocomplete="list"
+              aria-controls="overview-student-search-results"
+              aria-expanded={studentSearchOpen && matchingStudentOptions.length > 0}
+              autoComplete="off"
+              placeholder="Search by student name"
+              role="combobox"
+              value={studentSearchText}
+              onBlur={() => setStudentSearchOpen(false)}
+              onChange={(event) => {
+                setStudentSearchText(event.target.value);
+                setStudentSearchOpen(true);
+                if (selectedStudentId) onClearStudentSearch();
+              }}
+              onFocus={() => setStudentSearchOpen(true)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setStudentSearchOpen(false);
+                  return;
+                }
+                if (event.key === "Enter" && normalizeStudentName(studentSearchText) && matchingStudentOptions[0]) {
+                  event.preventDefault();
+                  selectStudentSearchOption(matchingStudentOptions[0]);
+                }
+              }}
+            />
+          </label>
+          {studentSearchOpen && matchingStudentOptions.length ? (
+            <div className="overview-student-search-results" id="overview-student-search-results" role="listbox">
+              {matchingStudentOptions.map((option) => (
+                <button
+                  key={option.key}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    selectStudentSearchOption(option);
+                  }}
+                  role="option"
+                  type="button"
+                >
+                  <strong>{option.name}</strong>
+                  <span>{option.schoolYear} / Grade {option.grade} / {option.homeroom}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          {selectedStudentId ? (
+            <button className="small-action" onClick={clearStudentSearch} type="button">
+              Clear student filter
+            </button>
+          ) : null}
         </div>
 
         <div className="overview-save-row">
           <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} />
           <div className="entry-status overview-student-count">
-            <strong>{rows.length}</strong>
-            <span>students assigned</span>
+            <strong>{rowData.length}</strong>
+            <span>{selectedStudentId ? `of ${rows.length} students shown` : "students assigned"}</span>
           </div>
         </div>
 
@@ -3284,7 +3821,8 @@ function ProfilePage({
   setProfile,
   currentRole,
   teamMembers,
-  onRoleChange,
+  onAccessChange,
+  assignmentHomerooms,
   onDeleteMember,
   events,
   importLogs,
@@ -3303,11 +3841,15 @@ function ProfilePage({
   setProfile: React.Dispatch<React.SetStateAction<{ name: string; email: string; grade: string; homeroom: string }>>;
   currentRole: UserRole;
   teamMembers: TeamMember[];
-  onRoleChange: (memberId: string, role: UserRole) => Promise<void>;
+  onAccessChange: (
+    memberId: string,
+    access: { role: UserRole; grade: string; homeroom: string }
+  ) => Promise<void>;
+  assignmentHomerooms: Record<string, string[]>;
   onDeleteMember: (memberId: string) => Promise<void>;
   events: AppAuditEvent[];
   importLogs: ImportChangeLog[];
-  onRevertImport: (importLogId: string) => Promise<void>;
+  onRevertImport: (importLogId: string) => Promise<ImportRevertOutcome>;
   authUser: User | null;
   openInvite: () => void;
   markUnsaved: (message?: string) => void;
@@ -3332,12 +3874,25 @@ function ProfilePage({
     markUnsaved("Profile changed. Save to update Firebase.");
   }
 
-  async function updateTeamRole(memberId: string, role: UserRole) {
-    setRoleUpdatingId(memberId);
+  async function updateTeamAccess(
+    member: TeamMember,
+    patch: Partial<Pick<TeamMember, "role" | "grade" | "homeroom">>
+  ) {
+    setRoleUpdatingId(member.id);
     setTeamMessage("");
     try {
-      await onRoleChange(memberId, role);
-      setTeamMessage("Role updated.");
+      const role = patch.role ?? member.role;
+      const firstAssignedGrade = Object.entries(assignmentHomerooms)
+        .find(([, homerooms]) => homerooms.length > 0)?.[0] ?? "";
+      const requestedGrade = patch.grade ?? member.grade;
+      const grade = role === "Admin" ? "" : requestedGrade || firstAssignedGrade;
+      const homerooms = assignmentHomerooms[grade] ?? [];
+      const requestedHomeroom = role === "Admin" ? "" : patch.homeroom ?? member.homeroom;
+      const homeroom = requestedHomeroom && homerooms.includes(requestedHomeroom)
+        ? requestedHomeroom
+        : homerooms[0] ?? "";
+      await onAccessChange(member.id, { role, grade, homeroom });
+      setTeamMessage("Team access updated.");
     } catch (error) {
       setTeamMessage(friendlyCallableError(error));
     } finally {
@@ -3433,18 +3988,22 @@ function ProfilePage({
             User name
             <input value={profile.name} onChange={(event) => updateProfileField("name", event.target.value)} />
           </label>
-          <label>
-            Email address
-            <input value={profile.email} onChange={(event) => updateProfileField("email", event.target.value)} />
-          </label>
-          <label>
-            Grade
-            <input value={profile.grade} onChange={(event) => updateProfileField("grade", event.target.value)} />
-          </label>
-          <label>
-            Home room
-            <input value={profile.homeroom} onChange={(event) => updateProfileField("homeroom", event.target.value)} />
-          </label>
+          <div className="profile-readonly-field">
+            <span>Email address</span>
+            <strong>{profile.email}</strong>
+          </div>
+          {currentRole === "Teacher / EA" ? (
+            <>
+              <div className="profile-readonly-field">
+                <span>Grade</span>
+                <strong>{profile.grade || "Not assigned"}</strong>
+              </div>
+              <div className="profile-readonly-field">
+                <span>Home room</span>
+                <strong>{profile.homeroom || "Not assigned"}</strong>
+              </div>
+            </>
+          ) : null}
           <div className="profile-role">
             <span>Role</span>
             <strong>{currentRole}</strong>
@@ -3520,7 +4079,7 @@ function ProfilePage({
                   aria-label={`Role for ${member.name}`}
                   disabled={member.id === authUser?.uid || roleUpdatingId === member.id || memberDeletingId === member.id}
                   value={member.role}
-                  onChange={(event) => updateTeamRole(member.id, event.target.value as UserRole)}
+                  onChange={(event) => updateTeamAccess(member, { role: event.target.value as UserRole })}
                 >
                   {roles.map((role) => (
                     <option key={role} value={role}>
@@ -3528,6 +4087,32 @@ function ProfilePage({
                     </option>
                   ))}
                 </select>
+                {member.role === "Teacher / EA" ? (
+                  <>
+                    <select
+                      aria-label={`Grade for ${member.name}`}
+                      disabled={roleUpdatingId === member.id || memberDeletingId === member.id}
+                      value={member.grade}
+                      onChange={(event) => updateTeamAccess(member, { grade: event.target.value, homeroom: "" })}
+                    >
+                      <option value="">Choose grade</option>
+                      {Object.keys(assignmentHomerooms).sort((left, right) => Number(left) - Number(right)).map((grade) => (
+                        <option key={grade} value={grade}>Grade {grade}</option>
+                      ))}
+                    </select>
+                    <select
+                      aria-label={`Home room for ${member.name}`}
+                      disabled={!member.grade || roleUpdatingId === member.id || memberDeletingId === member.id}
+                      value={member.homeroom}
+                      onChange={(event) => updateTeamAccess(member, { homeroom: event.target.value })}
+                    >
+                      <option value="">Choose home room</option>
+                      {(assignmentHomerooms[member.grade] ?? []).map((homeroom) => (
+                        <option key={homeroom} value={homeroom}>{homeroom}</option>
+                      ))}
+                    </select>
+                  </>
+                ) : null}
                 {member.role !== "Admin" || adminCount > 1 ? (
                   <button
                     className="danger-action team-delete-action"
@@ -4096,6 +4681,7 @@ type ImportColumnMatch = {
 type ParsedImportStudent = {
   studentName: string;
   homeroom: string;
+  sourceRowNumber: number;
   values: Array<{
     value: string | number | boolean | Date | null;
     match: ImportColumnMatch;
@@ -4133,13 +4719,14 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
   });
   const students = rows
     .slice(headerRowIndex + 1)
-    .map((row): ParsedImportStudent | null => {
+    .map((row, dataRowIndex): ParsedImportStudent | null => {
       const studentName = importCellText(row[studentColumnIndex]);
       if (!studentName) return null;
       const homeroom = homeroomColumnIndex >= 0 ? importCellText(row[homeroomColumnIndex]) || "Imported" : "Imported";
       return {
         studentName,
         homeroom,
+        sourceRowNumber: headerRowIndex + dataRowIndex + 2,
         values: importColumns
           .map((match, columnIndex) => {
             if (!match) return null;
@@ -4470,7 +5057,10 @@ function AddHomeroomModal({
   onAdd: (homeroom: string, studentCount: number) => void;
 }) {
   const [homeroom, setHomeroom] = useState("");
-  const [studentCount, setStudentCount] = useState(1);
+  const [studentCountText, setStudentCountText] = useState("1");
+  const studentCount = parseOverviewStudentCount(studentCountText);
+  const studentCountIsValid = studentCount !== null;
+  const canAdd = Boolean(homeroom.trim()) && studentCountIsValid;
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Add homeroom and students">
@@ -4493,15 +5083,29 @@ function AddHomeroomModal({
         <label>
           Number of students
           <input
-            min={1}
-            max={40}
-            type="number"
-            value={studentCount}
-            onChange={(event) => setStudentCount(Math.max(1, Number(event.target.value)))}
+            aria-describedby="student-count-help"
+            aria-invalid={!studentCountIsValid}
+            inputMode="numeric"
+            pattern="[0-9]*"
+            type="text"
+            value={studentCountText}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              if (/^\d*$/.test(nextValue)) setStudentCountText(nextValue);
+            }}
+            onFocus={(event) => event.currentTarget.select()}
           />
+          <small className={studentCountIsValid ? "field-help" : "field-help field-error"} id="student-count-help">
+            {studentCountIsValid ? "Enter a whole number from 1 to 40." : "Student count must be a whole number from 1 to 40."}
+          </small>
         </label>
 
-        <button className="primary-action" onClick={() => onAdd(homeroom, studentCount)} type="button">
+        <button
+          className="primary-action"
+          disabled={!canAdd}
+          onClick={() => studentCount !== null && onAdd(homeroom.trim(), studentCount)}
+          type="button"
+        >
           Add
         </button>
       </section>
@@ -4520,13 +5124,13 @@ function OverviewImportModal({
   currentGrade: string;
   onClose: () => void;
   onImport: (request: OverviewImportRequest) => Promise<OverviewImportResult>;
-  onRevert: (importLogId: string) => Promise<void>;
+  onRevert: (importLogId: string) => Promise<ImportRevertOutcome>;
 }) {
   const [schoolYear, setSchoolYear] = useState(currentYear);
   const [grade, setGrade] = useState(currentGrade);
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [status, setStatus] = useState<"idle" | "importing" | "complete" | "reverted" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "importing" | "complete" | "reverting" | "reverted" | "error">("idle");
   const [message, setMessage] = useState("Choose an Excel, Google Sheets export, or CSV file to import.");
   const [result, setResult] = useState<OverviewImportResult | null>(null);
   const yearOptions = useMemo(() => schoolYearImportOptions(), []);
@@ -4544,7 +5148,13 @@ function OverviewImportModal({
       const nextResult = await onImport({ file, schoolYear, grade });
       setResult(nextResult);
       setStatus("complete");
-      setMessage("Import complete.");
+      setMessage(
+        nextResult.sqlSyncPending
+          ? "Import saved to the shared workspace, but SQL synchronization is pending and will retry on reload. Do not import the file again."
+          : nextResult.auditSaved
+          ? "Import complete."
+          : "Import complete, but the shared audit entry is pending. Ask an Admin to retry or reconcile the audit before relying on the record."
+      );
     } catch (error) {
       setStatus("error");
       setMessage(readableImportError(error));
@@ -4552,12 +5162,29 @@ function OverviewImportModal({
   }
 
   async function revertImport() {
-    if (!result) return;
-    setStatus("importing");
+    if (!result || status === "reverting") return;
+    setStatus("reverting");
     setMessage("Reverting this import...");
-    await onRevert(result.importLogId);
-    setStatus("reverted");
-    setMessage("Import reverted.");
+    try {
+      const outcome = await onRevert(result.importLogId);
+      if (outcome === "reverted" || outcome === "reverted-audit-pending") {
+        setStatus("reverted");
+        setMessage(
+          outcome === "reverted"
+            ? "Import reverted and rollback saved."
+            : "Import data was reverted, but the shared audit entry is pending. Ask an Admin to retry or reconcile the audit."
+        );
+      } else if (outcome === "cancelled") {
+        setStatus("complete");
+        setMessage("Revert cancelled. The imported data remains unchanged.");
+      } else {
+        setStatus("error");
+        setMessage("This import is already reverted or another rollback is in progress.");
+      }
+    } catch (error) {
+      setStatus("error");
+      setMessage(`Revert failed. ${error instanceof Error ? error.message : "Please try again."}`);
+    }
   }
 
   function chooseFile(nextFile: File | undefined) {
@@ -4584,7 +5211,7 @@ function OverviewImportModal({
             <p className="eyebrow">Overview import</p>
             <h2>Import students and assessment data</h2>
           </div>
-          <button className="small-action ghost" onClick={onClose} type="button">
+          <button className="small-action ghost" disabled={status === "reverting"} onClick={onClose} type="button">
             Close
           </button>
         </div>
@@ -4670,10 +5297,10 @@ function OverviewImportModal({
         <div className="modal-actions">
           {result && status !== "reverted" ? (
             <>
-              <button className="danger-action" onClick={revertImport} type="button">
-                Revert
+              <button className="danger-action" disabled={status === "reverting"} onClick={revertImport} type="button">
+                {status === "reverting" ? "Reverting..." : "Revert"}
               </button>
-              <button className="primary-action" onClick={onClose} type="button">
+              <button className="primary-action" disabled={status === "reverting"} onClick={onClose} type="button">
                 Confirm
               </button>
             </>
@@ -4699,9 +5326,8 @@ function MoveStudentModal({
   onClose: () => void;
   onMove: (homeroom: string) => void;
 }) {
-  const [selectedHomeroom, setSelectedHomeroom] = useState(homerooms[0] ?? "custom");
-  const [customHomeroom, setCustomHomeroom] = useState("");
-  const targetHomeroom = selectedHomeroom === "custom" ? customHomeroom : selectedHomeroom;
+  const availableHomerooms = homerooms.filter((homeroom) => homeroom !== student?.homeroom);
+  const [selectedHomeroom, setSelectedHomeroom] = useState(availableHomerooms[0] ?? "");
 
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="Move student">
@@ -4716,26 +5342,22 @@ function MoveStudentModal({
           </button>
         </div>
 
-        <label>
-          Home room
-          <select value={selectedHomeroom} onChange={(event) => setSelectedHomeroom(event.target.value)}>
-            {homerooms.map((homeroom) => (
-              <option key={homeroom} value={homeroom}>
-                {homeroom}
-              </option>
-            ))}
-            <option value="custom">New home room</option>
-          </select>
-        </label>
-
-        {selectedHomeroom === "custom" ? (
+        {availableHomerooms.length ? (
           <label>
-            New home room
-            <input value={customHomeroom} onChange={(event) => setCustomHomeroom(event.target.value)} />
+            Home room
+            <select value={selectedHomeroom} onChange={(event) => setSelectedHomeroom(event.target.value)}>
+              {availableHomerooms.map((homeroom) => (
+                <option key={homeroom} value={homeroom}>
+                  {homeroom}
+                </option>
+              ))}
+            </select>
           </label>
-        ) : null}
+        ) : (
+          <p className="empty-state">No other homerooms exist in this grade. Add another homeroom before moving this student.</p>
+        )}
 
-        <button className="primary-action" onClick={() => onMove(targetHomeroom)} type="button">
+        <button className="primary-action" disabled={!selectedHomeroom} onClick={() => onMove(selectedHomeroom)} type="button">
           Move
         </button>
       </section>
@@ -5121,21 +5743,50 @@ function AuditLog({
 }: {
   events: AppAuditEvent[];
   importLogs: ImportChangeLog[];
-  onRevertImport: (importLogId: string) => Promise<void>;
+  onRevertImport: (importLogId: string) => Promise<ImportRevertOutcome>;
 }) {
   const [filter, setFilter] = useState("");
-  const [sortKey, setSortKey] = useState<"createdAt" | "eventType" | "entityType" | "entityLabel">("createdAt");
+  const [sortKey, setSortKey] = useState<AuditSortKey>("createdAt");
+  const [revertingImportId, setRevertingImportId] = useState<string | null>(null);
+  const [revertFeedback, setRevertFeedback] = useState<{
+    kind: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
   const sortedEvents = useMemo(() => {
     const normalizedFilter = filter.toLowerCase();
-    return [...events]
-      .filter((event) =>
+    return sortAuditEvents(
+      events.filter((event) =>
         [event.eventType, event.entityType, event.entityLabel, event.description, event.actor]
           .join(" ")
           .toLowerCase()
           .includes(normalizedFilter)
-      )
-      .sort((a, b) => String(b[sortKey]).localeCompare(String(a[sortKey])));
+      ),
+      sortKey
+    );
   }, [events, filter, sortKey]);
+
+  async function handleRevertImport(importLog: ImportChangeLog) {
+    if (revertingImportId) return;
+    setRevertingImportId(importLog.id);
+    setRevertFeedback({ kind: "info", message: `Reverting ${importLog.fileName}...` });
+    try {
+      const outcome = await onRevertImport(importLog.id);
+      if (outcome === "reverted") {
+        setRevertFeedback({ kind: "success", message: `${importLog.fileName} was reverted and the rollback was saved.` });
+      } else if (outcome === "cancelled") {
+        setRevertFeedback({ kind: "info", message: "Revert cancelled. No import data was changed." });
+      } else {
+        setRevertFeedback({ kind: "error", message: "This import is already reverted or another rollback is in progress." });
+      }
+    } catch (error) {
+      setRevertFeedback({
+        kind: "error",
+        message: `Revert failed. ${error instanceof Error ? error.message : "Please try again."}`
+      });
+    } finally {
+      setRevertingImportId(null);
+    }
+  }
 
   return (
     <section className="audit-layout">
@@ -5177,9 +5828,19 @@ function AuditLog({
               <option value="eventType">Event</option>
               <option value="entityType">Entity type</option>
               <option value="entityLabel">Entity</option>
+              <option value="actor">Actor</option>
             </select>
           </label>
         </div>
+
+        {revertFeedback ? (
+          <div
+            className={`audit-revert-feedback ${revertFeedback.kind}`}
+            role={revertFeedback.kind === "error" ? "alert" : "status"}
+          >
+            {revertFeedback.message}
+          </div>
+        ) : null}
 
         <div className="audit-table assessment-like-table" role="table" aria-label="Change logs">
           <div className="audit-table-row audit-table-head" role="row">
@@ -5202,8 +5863,13 @@ function AuditLog({
                 <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
                 <span>
                   {canRevert && importLog ? (
-                    <button className="small-action audit-revert-action" onClick={() => onRevertImport(importLog.id)} type="button">
-                      Revert
+                    <button
+                      className="small-action audit-revert-action"
+                      disabled={Boolean(revertingImportId)}
+                      onClick={() => handleRevertImport(importLog)}
+                      type="button"
+                    >
+                      {revertingImportId === importLog.id ? "Reverting..." : "Revert"}
                     </button>
                   ) : (
                     "-"
@@ -5251,10 +5917,11 @@ type StudentNameCellRendererParams = {
   value?: string;
   locked?: boolean;
   isDuplicate?: boolean;
-  studentNameSuggestions?: string[];
+  studentOptions?: StudentIdentityOption[];
   onMoveStudent?: (studentId: string) => void;
   onDeleteStudent?: (studentId: string) => void;
   onStudentNameChange?: (studentId: string, studentName: string) => void;
+  onSelectExistingStudent?: (placeholderId: string, existingStudentId: string) => void;
 };
 
 function StudentNameCellRenderer({
@@ -5262,10 +5929,11 @@ function StudentNameCellRenderer({
   value,
   locked = false,
   isDuplicate = false,
-  studentNameSuggestions = [],
+  studentOptions = [],
   onMoveStudent,
   onDeleteStudent,
-  onStudentNameChange
+  onStudentNameChange,
+  onSelectExistingStudent
 }: StudentNameCellRendererParams) {
   const studentId = data?.id;
   const displayValue = String(value ?? "");
@@ -5275,15 +5943,12 @@ function StudentNameCellRenderer({
   const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0, width: 260 });
   const suggestions = useMemo(() => {
     const normalizedDraft = normalizeStudentName(draft);
-    if (!normalizedDraft) return studentNameSuggestions.slice(0, 6);
+    if (!normalizedDraft || normalizedDraft === normalizeStudentName(displayValue)) return [];
 
-    return studentNameSuggestions
-      .filter((name) => {
-        const normalizedName = normalizeStudentName(name);
-        return normalizedName.includes(normalizedDraft) && normalizedName !== normalizedDraft;
-      })
+    return studentOptions
+      .filter((option) => option.id !== studentId && normalizeStudentName(option.name).includes(normalizedDraft))
       .slice(0, 6);
-  }, [draft, studentNameSuggestions]);
+  }, [displayValue, draft, studentId, studentOptions]);
 
   useEffect(() => {
     setDraft(displayValue);
@@ -5318,8 +5983,11 @@ function StudentNameCellRenderer({
     onStudentNameChange?.(studentId, cleanedName);
   }
 
-  function chooseSuggestion(name: string) {
-    commitName(name);
+  function chooseSuggestion(option: StudentIdentityOption) {
+    setDraft(option.name);
+    if (studentId && option.id !== studentId) {
+      onSelectExistingStudent?.(studentId, option.id);
+    }
     setFocused(false);
   }
 
@@ -5367,17 +6035,18 @@ function StudentNameCellRenderer({
             className="student-name-suggestions"
             style={{ left: menuPosition.left, top: menuPosition.top, width: menuPosition.width }}
           >
-            {suggestions.map((name, index) => (
+            {suggestions.map((option, index) => (
               <button
                 className={index === 0 ? "active" : ""}
-                key={name}
+                key={option.id}
                 onMouseDown={(event) => {
                   event.preventDefault();
-                  chooseSuggestion(name);
+                  chooseSuggestion(option);
                 }}
                 type="button"
               >
-                {name}
+                <strong>{option.name}</strong>
+                <small>{option.detail}</small>
                 {index === 0 ? <span>Tab</span> : null}
               </button>
             ))}
@@ -5431,9 +6100,10 @@ function studentActionColumn(
   onMoveStudent: (studentId: string) => void,
   onDeleteStudent: (studentId: string) => void,
   onStudentNameChange: (studentId: string, studentName: string) => void,
+  onSelectExistingStudent: (placeholderId: string, existingStudentId: string) => void,
   locked: boolean,
   duplicateStudentIds: string[] = [],
-  studentNameSuggestions: string[] = []
+  studentOptions: StudentIdentityOption[] = []
 ): ColDef<EntryRow> {
   return {
     field: "student",
@@ -5450,499 +6120,85 @@ function studentActionColumn(
     cellRendererParams: (params: { data?: EntryRow }) => ({
       locked,
       isDuplicate: Boolean(params.data?.id && duplicateStudentIds.includes(params.data.id)),
-      studentNameSuggestions,
+      studentOptions,
       onMoveStudent,
       onDeleteStudent,
-      onStudentNameChange
+      onStudentNameChange,
+      onSelectExistingStudent
     })
   };
 }
 
-type AssessmentGridApiLike = {
-  ensureColumnVisible?: (colKey: string) => void;
-  getAllDisplayedColumns?: () => Column[];
-  setFocusedCell?: (rowIndex: number, colKey: string) => void;
-  startEditingCell?: (params: { rowIndex: number; colKey: string }) => void;
-};
-
-function classTextIncludes(value: unknown, className: string): boolean {
-  if (typeof value === "string") return value.includes(className);
-  if (Array.isArray(value)) return value.some((item) => classTextIncludes(item, className));
-  return false;
-}
-
-function isAssessmentDataColumn(column: { getColDef?: () => ColDef<EntryRow> }) {
-  return classTextIncludes(column.getColDef?.().cellClass, "assessment-data-cell");
-}
-
-function findAssessmentGridCell(rowIndex: number, colId: string) {
-  const matchingCells = Array.from(document.querySelectorAll<HTMLElement>(".ag-center-cols-container .ag-cell"));
-  const exactRowCell = matchingCells.find(
-    (cell) => cell.getAttribute("row-index") === String(rowIndex) && cell.getAttribute("col-id") === colId
-  );
-  if (exactRowCell) return exactRowCell;
-
-  const focusedCell = matchingCells.find(
-    (cell) => cell.classList.contains("ag-cell-focus") && cell.getAttribute("col-id") === colId
-  );
-  if (focusedCell) return focusedCell;
-
-  return matchingCells.find((cell) => cell.getAttribute("col-id") === colId);
-}
-
-function activateAssessmentGridCell(rowIndex: number, colId: string, api?: AssessmentGridApiLike) {
-  api?.ensureColumnVisible?.(colId);
-
-  const activate = (attempt = 0) => {
-    api?.setFocusedCell?.(rowIndex, colId);
-    const nextCell = findAssessmentGridCell(rowIndex, colId);
-    const nextScaleButton = nextCell?.querySelector<HTMLButtonElement>(".scale-code-cell-display");
-    const nextScaleInput = nextCell?.querySelector<HTMLInputElement>(".scale-code-inline-input");
-    const nextScaleShell = nextCell?.querySelector<HTMLElement>(".scale-code-cell-shell");
-    const nextScaleCellId = nextScaleShell?.dataset.scaleCellId;
-
-    if (nextScaleInput) {
-      if (nextScaleCellId) {
-        (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus = nextScaleCellId;
-        window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: nextScaleCellId } }));
-      }
-      nextScaleInput.focus();
-      nextScaleInput.select();
-      if (attempt < 10 && document.activeElement !== nextScaleInput) window.setTimeout(() => activate(attempt + 1), 80);
-      return;
-    }
-
-    if (nextScaleButton) {
-      if (nextScaleCellId) {
-        (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus = nextScaleCellId;
-        window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: nextScaleCellId } }));
-      }
-      nextScaleButton.click();
-      requestAnimationFrame(() => {
-        if (nextScaleCellId) {
-          window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: nextScaleCellId } }));
-        }
-        nextCell?.querySelector<HTMLInputElement>(".scale-code-inline-input")?.focus();
-        nextCell?.querySelector<HTMLInputElement>(".scale-code-inline-input")?.select();
-      });
-      if (attempt < 10) window.setTimeout(() => activate(attempt + 1), 80);
-      return;
-    }
-
-    if (nextCell?.classList.contains("editable-score-cell")) {
-      nextCell.focus();
-      nextCell.click();
-      nextCell.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
-      api?.startEditingCell?.({ rowIndex, colKey: colId });
-      if (attempt < 10) window.setTimeout(() => activate(attempt + 1), 80);
-      return;
-    }
-
-    nextCell?.focus();
-  };
-
-  requestAnimationFrame(() => activate());
-}
-
-function focusScaleCodeInputInCell(rowIndex: number, colId: string) {
-  const focusInput = (attempt = 0) => {
-    const cell = findAssessmentGridCell(rowIndex, colId);
-    const shell = cell?.querySelector<HTMLElement>(".scale-code-cell-shell");
-    const input = cell?.querySelector<HTMLInputElement>(".scale-code-inline-input");
-    const scaleCellId = shell?.dataset.scaleCellId;
-
-    if (input) {
-      if (scaleCellId) {
-        (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus = scaleCellId;
-        window.dispatchEvent(new CustomEvent("scale-code-cell-focus", { detail: { cellId: scaleCellId } }));
-      }
-      input.focus();
-      input.select();
-      if (attempt < 10 && document.activeElement !== input) window.setTimeout(() => focusInput(attempt + 1), 60);
-      return;
-    }
-
-    if (attempt < 10) window.setTimeout(() => focusInput(attempt + 1), 60);
-  };
-
-  requestAnimationFrame(() => focusInput());
-}
-
-function nextAssessmentColumn(
-  api: AssessmentGridApiLike | undefined,
-  currentColId: string | undefined,
-  direction: 1 | -1
-) {
-  const columns = api?.getAllDisplayedColumns?.() ?? [];
-  const currentIndex = columns.findIndex((column) => column.getColId?.() === currentColId);
-  if (currentIndex < 0) return undefined;
-
-  const candidates = direction === 1 ? columns.slice(currentIndex + 1) : columns.slice(0, currentIndex).reverse();
-  return candidates.find(isAssessmentDataColumn);
-}
-
-function tabToNextAssessmentCell(params: TabToNextCellParams<EntryRow>): CellPosition | boolean {
-  const previous = params.previousCellPosition;
-  const rowIndex = previous?.rowIndex;
-  const currentColId = previous?.column?.getColId?.();
-  const direction = params.backwards ? -1 : 1;
-  const nextColumn = nextAssessmentColumn(params.api, currentColId, direction);
-  const nextColId = nextColumn?.getColId?.();
-
-  if (typeof rowIndex !== "number" || !nextColumn || !nextColId) return false;
-  activateAssessmentGridCell(rowIndex, nextColId, params.api);
-  return {
-    rowIndex,
-    rowPinned: previous?.rowPinned ?? null,
-    column: nextColumn
-  };
-}
-
-type ScaleCodeCellEditorParams = {
-  data?: EntryRow;
-  value?: unknown;
-  initialValue?: unknown;
-  onValueChange?: (value: string | null) => void;
+type ScaleCodeCellEditorParams = ICellEditorParams<EntryRow, string | null> & {
   codes?: string[];
-  fieldName?: string;
-  rowId?: string;
-  commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void;
-  eventKey?: string | null;
-  charPress?: string | null;
-  stopEditing?: (suppressNavigateAfterEdit?: boolean) => void;
-  column?: {
-    getColId?: () => string;
-  };
-  node?: {
-    rowIndex?: number | null;
-  };
-  api?: AssessmentGridApiLike & {
-    tabToNextCell?: () => boolean;
-    tabToPreviousCell?: () => boolean;
-  };
 };
 
-const ScaleCodeCellRenderer = forwardRef(function ScaleCodeCellRenderer(
+const ScaleCodeCellEditor = forwardRef(function ScaleCodeCellEditor(
   {
-    data,
     value,
-    initialValue,
-    onValueChange,
-    codes = [],
-    fieldName,
-    rowId,
-    commitScaleCodeValue,
     eventKey,
-    charPress,
+    codes = [],
+    onKeyDown: onGridKeyDown,
     stopEditing,
     column,
-    node,
-    api
+    node
   }: ScaleCodeCellEditorParams,
   ref
 ) {
-  const shellRef = useRef<HTMLSpanElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const committingRef = useRef(false);
-  const openingCharacter = printableEditorCharacter(charPress ?? eventKey);
-  const startedWithKeyPress = Boolean(openingCharacter);
-  const displayValue = String(value ?? initialValue ?? "");
-  const effectiveRowId = rowId ?? data?.id;
-  const scaleCellId = effectiveRowId && fieldName ? `${effectiveRowId}:${fieldName}` : "";
-  const initialDraft = openingCharacter ?? displayValue;
-  const committedValueRef = useRef(initialDraft);
-  const [draft, setDraft] = useState(initialDraft);
-  const [focused, setFocused] = useState(false);
-  const [editing, setEditing] = useState(startedWithKeyPress);
-  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0, width: 160 });
   const normalizedCodes = useMemo(() => codes.map((code) => code.trim()).filter(Boolean), [codes]);
-  const suggestions = useMemo(() => {
-    const normalizedDraft = draft.trim().toLowerCase();
-    if (!normalizedDraft) return normalizedCodes.slice(0, 8);
-    return normalizedCodes.filter((code) => code.toLowerCase().includes(normalizedDraft)).slice(0, 8);
-  }, [draft, normalizedCodes]);
-
-  useEffect(() => {
-    if (!focused) setDraft(displayValue);
-  }, [displayValue, focused]);
-
-  useEffect(() => {
-    if (!scaleCellId || typeof window === "undefined") return;
-    const pendingFocusCellId = (window as Window & { __pendingScaleCodeCellFocus?: string }).__pendingScaleCodeCellFocus;
-    if (pendingFocusCellId !== scaleCellId) return;
-    startEditing();
-    window.setTimeout(() => {
-      const focusWindow = window as Window & { __pendingScaleCodeCellFocus?: string };
-      if (focusWindow.__pendingScaleCodeCellFocus === scaleCellId) delete focusWindow.__pendingScaleCodeCellFocus;
-    }, 600);
-  }, [scaleCellId, displayValue]);
-
-  useEffect(() => {
-    if (!scaleCellId || typeof window === "undefined") return;
-
-    function handleScaleCodeCellFocus(event: Event) {
-      const cellId = (event as CustomEvent<{ cellId?: string }>).detail?.cellId;
-      if (cellId === scaleCellId) startEditing();
-    }
-
-    window.addEventListener("scale-code-cell-focus", handleScaleCodeCellFocus);
-    return () => window.removeEventListener("scale-code-cell-focus", handleScaleCodeCellFocus);
-  }, [scaleCellId, displayValue]);
+  const openingCharacter = printableEditorCharacter(eventKey);
+  const [draft, setDraft] = useState(openingCharacter ?? String(value ?? ""));
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useMemo(
+    () => `scale-codes-${String(node.rowIndex ?? "row")}-${column.getColId().replace(/[^a-z0-9_-]/gi, "-")}`,
+    [column, node.rowIndex]
+  );
 
   useImperativeHandle(ref, () => ({
-    getValue() {
-      const exactCode = normalizedCodes.find((code) => code.toLowerCase() === committedValueRef.current.trim().toLowerCase());
-      return exactCode ?? null;
-    }
-  }));
-
-  useEffect(() => {
-    if (!startedWithKeyPress) return;
-    requestAnimationFrame(() => {
-      setEditing(true);
+    afterGuiAttached() {
       inputRef.current?.focus();
-    });
-  }, [startedWithKeyPress]);
-
-  useEffect(() => {
-    if (!focused) return;
-
-    updateMenuPosition();
-    window.addEventListener("resize", updateMenuPosition);
-    window.addEventListener("scroll", updateMenuPosition, true);
-    return () => {
-      window.removeEventListener("resize", updateMenuPosition);
-      window.removeEventListener("scroll", updateMenuPosition, true);
-    };
-  }, [draft, focused]);
-
-  function updateMenuPosition() {
-    const bounds = inputRef.current?.getBoundingClientRect();
-    if (!bounds) return;
-    setMenuPosition({
-      top: bounds.bottom + 4,
-      left: bounds.left,
-      width: Math.max(160, bounds.width)
-    });
-  }
-
-  function chooseCode(code: string) {
-    commitEditor(code);
-    setFocused(false);
-    setEditing(false);
-  }
-
-  function focusAdjacentEditableGridCell(fromElement: HTMLElement, direction: 1 | -1) {
-    const currentGridCell = fromElement.closest<HTMLElement>(".ag-cell");
-    const currentRowIndex = currentGridCell?.getAttribute("row-index");
-    let targetRowIndex: number | undefined;
-    let targetColId: string | undefined;
-
-    if (currentGridCell && currentRowIndex) {
-      const rowAssessmentCells = Array.from(document.querySelectorAll<HTMLElement>(".ag-center-cols-container .ag-cell.assessment-data-cell"))
-        .filter((cell) => cell.getAttribute("row-index") === currentRowIndex)
-        .sort((first, second) => Number(first.getAttribute("aria-colindex") ?? 0) - Number(second.getAttribute("aria-colindex") ?? 0));
-      const currentIndex = rowAssessmentCells.indexOf(currentGridCell);
-      const nextCell = rowAssessmentCells[currentIndex + direction];
-      const rowNextColId = nextCell?.getAttribute("col-id");
-      const rowNextIndex = Number(currentRowIndex);
-
-      if (rowNextColId && Number.isFinite(rowNextIndex)) {
-        targetRowIndex = rowNextIndex;
-        targetColId = rowNextColId;
-      }
+      inputRef.current?.select();
+    },
+    getValue() {
+      return validScaleCodeValue(draft, normalizedCodes);
+    },
+    getValidationErrors() {
+      if (!draft.trim() || validScaleCodeValue(draft, normalizedCodes)) return null;
+      return [`Choose one of: ${normalizedCodes.join(", ")}.`];
     }
-
-    if (typeof targetRowIndex !== "number" || !targetColId) {
-      const currentColId = column?.getColId?.() ?? fieldName;
-      const gridRowIndex = node?.rowIndex;
-      const nextColumn = nextAssessmentColumn(api, currentColId, direction);
-      const gridNextColId = nextColumn?.getColId?.();
-
-      if (typeof gridRowIndex === "number" && gridNextColId) {
-        targetRowIndex = gridRowIndex;
-        targetColId = gridNextColId;
-      }
-    }
-
-    setEditing(false);
-    requestAnimationFrame(() => {
-      if (typeof targetRowIndex === "number" && targetColId) {
-        activateAssessmentGridCell(targetRowIndex, targetColId, api);
-        return;
-      }
-
-      if (!currentGridCell) return;
-
-      const assessmentCells = Array.from(document.querySelectorAll<HTMLElement>(".ag-center-cols-container .ag-cell.assessment-data-cell"));
-      const currentIndex = assessmentCells.indexOf(currentGridCell);
-      const nextCell = assessmentCells[currentIndex + direction];
-      const fallbackNextColId = nextCell?.getAttribute("col-id");
-      const fallbackRowIndex = Number(nextCell?.getAttribute("row-index"));
-      if (fallbackNextColId && Number.isFinite(fallbackRowIndex)) activateAssessmentGridCell(fallbackRowIndex, fallbackNextColId, api);
-    });
-  }
-
-  function commitEditor(nextValue: string | null, navigate?: "next" | "previous") {
-    committingRef.current = true;
-    committedValueRef.current = nextValue ?? "";
-    onValueChange?.(nextValue);
-    if (effectiveRowId && fieldName) commitScaleCodeValue?.(effectiveRowId, fieldName, nextValue);
-    setDraft(nextValue ?? "");
-
-    requestAnimationFrame(() => {
-      stopEditing?.(false);
-      requestAnimationFrame(() => {
-        if (navigate === "previous") {
-          api?.tabToPreviousCell?.();
-          return;
-        }
-        if (navigate === "next") api?.tabToNextCell?.();
-      });
-    });
-  }
-
-  function startEditing(nextDraft = displayValue) {
-    committingRef.current = false;
-    setDraft(nextDraft);
-    setEditing(true);
-    const focusInput = (attempt = 0) => {
-      const input = inputRef.current;
-      if (!input) {
-        if (attempt < 8) window.setTimeout(() => focusInput(attempt + 1), 50);
-        return;
-      }
-
-      input.focus();
-      input.select();
-      updateMenuPosition();
-      if (attempt < 8 && document.activeElement !== input) window.setTimeout(() => focusInput(attempt + 1), 50);
-    };
-    requestAnimationFrame(() => focusInput());
-  }
-
-  function handleKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
-    if (event.key === "Tab") {
-      event.preventDefault();
-      event.stopPropagation();
-
-      const currentExactCode = validScaleCodeValue(draft, normalizedCodes);
-      const highlightedCode = suggestions[0];
-      const shouldAcceptHighlightedCode =
-        Boolean(highlightedCode && draft.trim()) && currentExactCode?.toLowerCase() !== highlightedCode?.toLowerCase();
-
-      if (highlightedCode && shouldAcceptHighlightedCode) {
-        committedValueRef.current = highlightedCode;
-        setDraft(highlightedCode);
-        setFocused(true);
-        setEditing(true);
-        requestAnimationFrame(() => {
-          inputRef.current?.focus();
-          inputRef.current?.select();
-        });
-        return;
-      }
-
-      commitEditor(currentExactCode);
-      setFocused(false);
-      setEditing(false);
-      focusAdjacentEditableGridCell(event.currentTarget, event.shiftKey ? -1 : 1);
-      return;
-    }
-
-    if (event.key === "Enter" && suggestions[0]) {
-      event.preventDefault();
-      event.stopPropagation();
-      commitEditor(suggestions[0]);
-      setFocused(false);
-      setEditing(false);
-      return;
-    }
-
-    if (event.key === "Enter") {
-      event.preventDefault();
-      event.stopPropagation();
-      commitEditor(validScaleCodeValue(draft, normalizedCodes));
-      setEditing(false);
-      event.currentTarget.blur();
-    }
-
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      event.stopPropagation();
-      commitEditor(validScaleCodeValue(draft, normalizedCodes));
-      focusAdjacentEditableGridCell(event.currentTarget, event.key === "ArrowDown" ? 1 : -1);
-    }
-  }
-
-  const suggestionMenu =
-    focused && suggestions.length && typeof document !== "undefined"
-      ? createPortal(
-          <div
-            className="student-name-suggestions scale-code-suggestions"
-            style={{ left: menuPosition.left, top: menuPosition.top, width: menuPosition.width }}
-          >
-            {suggestions.map((code, index) => (
-              <button
-                className={index === 0 ? "active" : ""}
-                key={code}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  chooseCode(code);
-                }}
-                type="button"
-              >
-                {code}
-                {index === 0 ? <span>Tab</span> : null}
-              </button>
-            ))}
-          </div>,
-          document.body
-        )
-      : null;
+  }), [draft, normalizedCodes]);
 
   return (
-    <span className="scale-code-cell-shell" data-scale-cell-id={scaleCellId} ref={shellRef}>
+    <>
       <input
         ref={inputRef}
+        aria-label="Scale code"
         className="scale-code-inline-input"
+        list={listId}
         value={draft}
-        onBlur={() => {
-          if (!committingRef.current) commitEditor(validScaleCodeValue(draft, normalizedCodes));
-          committingRef.current = false;
-          setFocused(false);
-          setEditing(false);
-        }}
-        onChange={(event) => {
-          committedValueRef.current = event.target.value;
-          setDraft(event.target.value);
-        }}
-        onInput={(event) => {
-          const nextValue = event.currentTarget.value;
-          committedValueRef.current = nextValue;
-          setDraft(nextValue);
-          setFocused(true);
-        }}
-        onFocus={(event) => {
-          const bounds = event.currentTarget.getBoundingClientRect();
-          setMenuPosition({ top: bounds.bottom + 4, left: bounds.left, width: Math.max(160, bounds.width) });
-          setFocused(true);
-          setEditing(true);
-          requestAnimationFrame(() => event.currentTarget.select());
-        }}
-        onKeyDown={handleKeyDown}
-        onKeyDownCapture={handleKeyDown}
-        onKeyUp={(event) => {
-          committedValueRef.current = event.currentTarget.value;
-          setDraft(event.currentTarget.value);
-          setFocused(true);
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Tab" || event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            onGridKeyDown(event.nativeEvent);
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            event.stopPropagation();
+            stopEditing();
+          }
         }}
       />
-      {suggestionMenu}
-    </span>
+      <datalist id={listId}>
+        {normalizedCodes.map((code) => (
+          <option key={code} value={code} />
+        ))}
+      </datalist>
+    </>
   );
 });
-
 function DefaultValueHeader({
   displayName,
   onOpenDefaultValue
@@ -5972,11 +6228,17 @@ function DefaultValueHeader({
   );
 }
 
-function normalizedDefaultFieldValue(field: AssessmentFieldTemplate, rawValue: string, scaleCodes: string[]) {
+function validateDefaultFieldValue(field: AssessmentFieldTemplate, rawValue: string, scaleCodes: string[]) {
   if (scaleCodes.length && (field.dataType === "letter" || field.dataType === "text")) {
-    return validScaleCodeValue(rawValue, scaleCodes);
+    const value = validScaleCodeValue(rawValue, scaleCodes);
+    if (!rawValue.trim() || value) return { valid: true as const, value, error: null };
+    return {
+      valid: false as const,
+      value: null,
+      error: `${field.name} must be one of: ${scaleCodes.join(", ")}.`
+    };
   }
-  return normalizedAssessmentValue(rawValue, field);
+  return validateAssessmentValue(rawValue, field);
 }
 
 function fieldColumn(
@@ -5985,13 +6247,15 @@ function fieldColumn(
   field: AssessmentFieldTemplate,
   section?: AssessmentSectionTemplate,
   extraCellClass = "",
-  commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void,
-  openDefaultValuePopup?: (target: DefaultValueTarget) => void
+  _commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void,
+  openDefaultValuePopup?: (target: DefaultValueTarget) => void,
+  context: { schoolYear?: string; grade?: string } = {}
 ): ColDef<EntryRow> {
   const fieldName = assessmentValueKey(assessment, round, field, section);
   const scaleCodes = scaleCodesForField(field);
   const usesScaleCodeEditor = !field.isCalculated && (field.dataType === "letter" || field.dataType === "text") && scaleCodes.length > 0;
-  const canBulkDefault = isEditableAssessmentField(assessment, field);
+  const editable = isEditableAssessmentField(assessment, field);
+  const canBulkDefault = editable;
   const defaultValueTarget = {
     fieldName,
     field,
@@ -5999,16 +6263,23 @@ function fieldColumn(
     scaleCodes
   };
   const scaleCodeParams = usesScaleCodeEditor
-    ? (params: { data?: EntryRow }) => ({
-        codes: scaleCodes,
-        fieldName,
-        rowId: params.data?.id,
-        commitScaleCodeValue
+    ? { codes: scaleCodes }
+    : undefined;
+  const numberEditorParams = field.dataType === "integer" || field.dataType === "percentage"
+    ? (params: { data: EntryRow }) => ({
+        min: field.validationConfig?.min ?? 0,
+        max: field.validationConfig?.max ?? (field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER),
+        precision: field.dataType === "integer" ? 0 : field.validationConfig?.precision,
+        step: field.dataType === "integer" ? 1 : undefined,
+        preventStepping: true,
+        getValidationErrors: ({ value }: { value: unknown }) => {
+          const validation = validateAssessmentTableEdit(params.data, assessment, fieldName, value, context);
+          return validation.valid ? null : [validation.error];
+        }
       })
     : undefined;
   return {
     colId: fieldName,
-    field: usesScaleCodeEditor ? fieldName : undefined,
     headerName: field.name,
     headerComponent: DefaultValueHeader,
     headerComponentParams: {
@@ -6016,28 +6287,33 @@ function fieldColumn(
     },
     width: field.name.length > 12 ? 150 : 104,
     cellDataType: usesScaleCodeEditor ? false : undefined,
-    editable: isEditableAssessmentField(assessment, field),
-    cellRenderer: usesScaleCodeEditor ? ScaleCodeCellRenderer : undefined,
-    cellRendererParams: scaleCodeParams,
+    editable,
+    singleClickEdit: usesScaleCodeEditor,
     cellEditor: usesScaleCodeEditor
-      ? ScaleCodeCellRenderer
+      ? ScaleCodeCellEditor
       : field.dataType === "integer" || field.dataType === "percentage"
         ? "agNumberCellEditor"
         : undefined,
-    cellEditorParams: scaleCodeParams,
+    cellEditorParams: scaleCodeParams ?? numberEditorParams,
     valueGetter: (params) => params.data?.[fieldName] ?? null,
     valueSetter: (params) => {
       if (!params.data) return false;
-      const nextValue = usesScaleCodeEditor
-        ? validScaleCodeValue(params.newValue, scaleCodes)
-        : normalizedAssessmentValue(params.newValue, field);
+      const validation = usesScaleCodeEditor
+        ? validateDefaultFieldValue(field, String(params.newValue ?? ""), scaleCodes)
+        : validateAssessmentTableEdit(params.data, assessment, fieldName, params.newValue, context);
+      if (!validation.valid) return false;
+      const nextValue = validation.value;
       if (params.data[fieldName] === nextValue) return false;
       params.data[fieldName] = nextValue;
       return true;
     },
-    valueParser: (params) =>
-      field.dataType === "integer" || field.dataType === "percentage" ? toNumber(params.newValue) : params.newValue,
-    cellClass: ["assessment-data-cell", field.isCalculated ? "locked-formula-cell" : "editable-score-cell", extraCellClass]
+    valueParser: (params) => {
+      if (field.dataType !== "integer" && field.dataType !== "percentage") return params.newValue;
+      if (!params.data) return params.oldValue;
+      const validation = validateAssessmentTableEdit(params.data, assessment, fieldName, params.newValue, context);
+      return validation.valid ? validation.value : params.oldValue;
+    },
+    cellClass: ["assessment-data-cell", editable ? "editable-score-cell" : "locked-formula-cell", extraCellClass]
       .filter(Boolean)
       .join(" "),
     cellStyle: { backgroundColor: round.color ?? "#fffaf0" },
@@ -6060,7 +6336,8 @@ function columnsForRound(
   hiddenFieldIds: string[] = [],
   hiddenSectionIds: string[] = [],
   commitScaleCodeValue?: (rowId: string, fieldName: string, nextValue: string | null) => void,
-  openDefaultValuePopup?: (target: DefaultValueTarget) => void
+  openDefaultValuePopup?: (target: DefaultValueTarget) => void,
+  context: { schoolYear?: string; grade?: string } = {}
 ): ColDef<EntryRow>[] {
   const fieldsForRound = assessment.fields.filter(
     (field) => !hiddenFieldIds.includes(field.id) && (!field.roundIds?.length || field.roundIds.includes(round.id))
@@ -6081,7 +6358,8 @@ function columnsForRound(
             section,
             index === sectionFields.length - 1 ? "hierarchy-boundary-cell" : "",
             commitScaleCodeValue,
-            openDefaultValuePopup
+            openDefaultValuePopup,
+            context
           )
         )
       }];
@@ -6098,7 +6376,8 @@ function columnsForRound(
         undefined,
         index === unsectionedFields.length - 1 ? "hierarchy-boundary-cell" : "",
         commitScaleCodeValue,
-        openDefaultValuePopup
+        openDefaultValuePopup,
+        context
       )
     )
   ];
@@ -6126,19 +6405,23 @@ function overviewColumnsFor(template: AssessmentTemplate): ColDef<EntryRow>[] {
   return [{ field: "report_status", headerName: "Report", width: 130 }];
 }
 
-function uniqueStudentNames(rows: OrfResultRow[]) {
-  return Array.from(
-    new Map(
-      rows
-        .map((row) => row.student.trim().replace(/\s+/g, " "))
-        .filter(Boolean)
-        .map((name) => [normalizeStudentName(name), name])
-    ).values()
-  ).sort((first, second) => first.localeCompare(second));
-}
-
 function normalizeStudentName(name: string) {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function teamAssignmentHomerooms(placements: StudentPlacement[], schoolYear?: string) {
+  const assignments: Record<string, string[]> = Object.fromEntries(
+    ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((grade) => [grade, []])
+  );
+  if (!schoolYear) return assignments;
+
+  for (const placement of placements) {
+    if (placement.schoolYear !== schoolYear) continue;
+    const homerooms = assignments[placement.grade] ?? (assignments[placement.grade] = []);
+    if (!homerooms.includes(placement.homeroom)) homerooms.push(placement.homeroom);
+  }
+  for (const homerooms of Object.values(assignments)) homerooms.sort();
+  return assignments;
 }
 
 function overviewRowsForSelection(
@@ -6154,66 +6437,6 @@ function overviewRowsForSelection(
       return row ? { ...row, homeroom: placement.homeroom } : null;
     })
     .filter((row): row is OrfResultRow => Boolean(row));
-}
-
-function reconcilePriorYearStudentPlacements(
-  rows: OrfResultRow[],
-  placements: StudentPlacement[],
-  selectedYear: string,
-  selectedGrade: string
-) {
-  const rowsById = new Map(rows.map((row) => [row.id, row]));
-  const rowsByName = new Map<string, OrfResultRow[]>();
-  rows.forEach((row) => {
-    const normalizedName = normalizeStudentName(row.student);
-    if (!normalizedName) return;
-    rowsByName.set(normalizedName, [...(rowsByName.get(normalizedName) ?? []), row]);
-  });
-
-  const replacementIds = new Map<string, string>();
-  const mergedRowsById = new Map(rows.map((row) => [row.id, row]));
-
-  placements
-    .filter((placement) => placement.schoolYear === selectedYear && placement.grade === selectedGrade)
-    .forEach((placement) => {
-      const row = rowsById.get(placement.studentId);
-      if (!row) return;
-
-      const matchingRows = rowsByName.get(normalizeStudentName(row.student)) ?? [];
-      const existingPriorRow = matchingRows.find((candidate) => {
-        if (candidate.id === row.id) return false;
-        const alreadyPlacedThisYear = placements.some(
-          (existingPlacement) => existingPlacement.studentId === candidate.id && existingPlacement.schoolYear === selectedYear
-        );
-        return !alreadyPlacedThisYear;
-      });
-      if (!existingPriorRow) return;
-
-      replacementIds.set(row.id, existingPriorRow.id);
-      mergedRowsById.set(existingPriorRow.id, {
-        ...existingPriorRow,
-        student: existingPriorRow.student || row.student,
-        homeroom: placement.homeroom,
-        assessmentValues: {
-          ...(existingPriorRow.assessmentValues ?? {}),
-          ...(row.assessmentValues ?? {})
-        }
-      });
-    });
-
-  if (!replacementIds.size) return { rows, placements };
-
-  const nextPlacements = placements.map((placement) => ({
-    ...placement,
-    studentId: replacementIds.get(placement.studentId) ?? placement.studentId
-  }));
-  const placedStudentIds = new Set(nextPlacements.map((placement) => placement.studentId));
-  const nextRows = Array.from(mergedRowsById.values()).filter((row) => !replacementIds.has(row.id) || placedStudentIds.has(row.id));
-
-  return {
-    rows: nextRows,
-    placements: nextPlacements
-  };
 }
 
 function findOverviewStudentNameConflicts(
@@ -6271,14 +6494,18 @@ function findOverviewStudentNameConflicts(
   return conflicts;
 }
 
-function studentRowsChangedSinceLastSave(rows: OrfResultRow[], savedState: WorkspaceStudentSnapshot | null) {
-  if (!savedState) return rows;
-  const savedRowsById = new Map(savedState.rows.map((row) => [row.id, row]));
+function newAuditEventId() {
+  const randomId = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `audit-${randomId}`;
+}
 
-  return rows.filter((row) => {
-    const savedRow = savedRowsById.get(row.id);
-    return !savedRow || normalizeStudentName(savedRow.student) !== normalizeStudentName(row.student);
-  });
+function authenticatedActorName(user: User | null) {
+  return user?.displayName?.trim()
+    || user?.email?.split("@")[0]
+    || user?.email
+    || "Authenticated user";
 }
 
 function initialsFor(name: string) {

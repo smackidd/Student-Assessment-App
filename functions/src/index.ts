@@ -28,10 +28,21 @@ type InviteRequest = {
 type UpdateRoleRequest = {
   uid?: unknown;
   role?: unknown;
+  grade?: unknown;
+  homeroom?: unknown;
 };
 
 type DeleteUserRequest = {
   uid?: unknown;
+};
+
+type RecordAuditEventRequest = {
+  id?: unknown;
+  eventType?: unknown;
+  entityType?: unknown;
+  entityLabel?: unknown;
+  description?: unknown;
+  importLogId?: unknown;
 };
 
 export const blockPublicSignUp = beforeUserCreated({ region }, () => {
@@ -128,8 +139,10 @@ export const inviteUser = onCall(
       role
     });
 
+    const invitationReturnUrl = new URL(applicationUrl.value());
+    invitationReturnUrl.searchParams.set("invited", "1");
     const actionLink = await getAuth().generatePasswordResetLink(email, {
-      url: applicationUrl.value(),
+      url: invitationReturnUrl.toString(),
       handleCodeInApp: false
     });
     await queueInvitationEmail({ email, displayName, role, actionLink });
@@ -153,6 +166,14 @@ export const updateOrganizationUserRole = onCall(
     const admin = requireAdmin(request);
     const uid = requiredText(request.data.uid, "user");
     const role = requiredRole(request.data.role);
+    const grade = optionalAssignment(request.data.grade, "grade");
+    const homeroom = optionalAssignment(request.data.homeroom, "homeroom");
+    if (role === "teacher_ea" && (!grade || !homeroom)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Teacher / EA access requires both a grade and a home room assignment."
+      );
+    }
     if (uid === admin.uid) {
       throw new HttpsError("failed-precondition", "Admins cannot change their own role.");
     }
@@ -162,13 +183,74 @@ export const updateOrganizationUserRole = onCall(
       throw new HttpsError("not-found", "That user is not part of this organization.");
     }
 
+    const { grade: _previousGrade, homeroom: _previousHomeroom, ...existingClaims } = user.customClaims ?? {};
     await getAuth().setCustomUserClaims(uid, {
-      ...user.customClaims,
+      ...existingClaims,
       organizationId,
-      role
+      role,
+      ...(role === "teacher_ea" ? { grade, homeroom } : {})
     });
     await getAuth().revokeRefreshTokens(uid);
+    await getFirestore()
+      .collection("organizations")
+      .doc(organizationId)
+      .collection("accessChanges")
+      .doc(uid)
+      .set({
+        uid,
+        changedBy: admin.uid,
+        changedAt: FieldValue.serverTimestamp()
+      });
     return { member: organizationMember(await getAuth().getUser(uid)) };
+  }
+);
+
+export const recordAuditEvent = onCall(
+  { region },
+  async (request: CallableRequest<RecordAuditEventRequest>) => {
+    const authenticatedUser = requireOrganizationMember(request);
+    const id = requiredAuditEventId(request.data.id);
+    const eventType = requiredLimitedText(request.data.eventType, "event type", 100);
+    const entityType = requiredLimitedText(request.data.entityType, "entity type", 100);
+    const entityLabel = requiredLimitedText(request.data.entityLabel, "entity", 500);
+    const description = requiredLimitedText(request.data.description, "description", 5000);
+    const importLogId = optionalLimitedText(request.data.importLogId, "import log", 160);
+    const actorUser = await getAuth().getUser(authenticatedUser.uid);
+    const actorEmail = actorUser.email ?? normalizeEmail(authenticatedUser.email);
+    const actor = actorUser.displayName?.trim()
+      || actorEmail.split("@")[0]
+      || actorEmail
+      || authenticatedUser.uid;
+    const auditEvent = getFirestore()
+      .collection("organizations")
+      .doc(organizationId)
+      .collection("auditEvents")
+      .doc(id);
+
+    await getFirestore().runTransaction(async (transaction) => {
+      const existing = await transaction.get(auditEvent);
+      if (existing.exists) {
+        if (existing.get("actorUid") !== authenticatedUser.uid) {
+          throw new HttpsError("already-exists", "That audit event identifier is already in use.");
+        }
+        return;
+      }
+
+      transaction.set(auditEvent, {
+        eventType,
+        entityType,
+        entityLabel,
+        description,
+        actor,
+        actorUid: authenticatedUser.uid,
+        actorEmail,
+        createdAt: FieldValue.serverTimestamp(),
+        ...(importLogId ? { importLogId } : {})
+      });
+    });
+
+    const savedEvent = await auditEvent.get();
+    return { event: auditEventForClient(savedEvent.id, savedEvent.data()) };
   }
 );
 
@@ -231,6 +313,14 @@ function requireAdmin(request: CallableRequest<unknown>) {
   return token;
 }
 
+function requireOrganizationMember(request: CallableRequest<unknown>) {
+  const token = requireSignedIn(request);
+  if (token.organizationId !== organizationId || !isOrganizationRole(token.role)) {
+    throw new HttpsError("permission-denied", "Active organization access is required.");
+  }
+  return token;
+}
+
 function claimRole(token: DecodedIdToken) {
   return isOrganizationRole(token.role) ? token.role : null;
 }
@@ -259,6 +349,27 @@ function requiredText(value: unknown, label: string) {
     throw new HttpsError("invalid-argument", `Enter a ${label}.`);
   }
   return value.trim();
+}
+
+function requiredLimitedText(value: unknown, label: string, maximumLength: number) {
+  const text = requiredText(value, label);
+  if (text.length > maximumLength) {
+    throw new HttpsError("invalid-argument", `The ${label} is too long.`);
+  }
+  return text;
+}
+
+function optionalLimitedText(value: unknown, label: string, maximumLength: number) {
+  if (value === undefined || value === null || value === "") return "";
+  return requiredLimitedText(value, label, maximumLength);
+}
+
+function requiredAuditEventId(value: unknown) {
+  const id = requiredLimitedText(value, "audit event identifier", 160);
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    throw new HttpsError("invalid-argument", "The audit event identifier is invalid.");
+  }
+  return id;
 }
 
 function normalizeEmail(value: unknown) {
@@ -298,8 +409,47 @@ function organizationMember(user: UserRecord) {
     displayName: user.displayName ?? user.email?.split("@")[0] ?? "Team member",
     email: user.email ?? "",
     role,
-    status: user.metadata.lastSignInTime ? ("active" as const) : ("invited" as const)
+    status: user.metadata.lastSignInTime ? ("active" as const) : ("invited" as const),
+    grade: claimText(user.customClaims?.grade),
+    homeroom: claimText(user.customClaims?.homeroom)
   };
+}
+
+function auditEventForClient(id: string, data: Record<string, unknown> | undefined) {
+  const createdAt = timestampIso(data?.createdAt);
+  if (!createdAt) throw new HttpsError("internal", "The audit event timestamp could not be confirmed.");
+  return {
+    id,
+    eventType: String(data?.eventType ?? ""),
+    entityType: String(data?.entityType ?? ""),
+    entityLabel: String(data?.entityLabel ?? ""),
+    description: String(data?.description ?? ""),
+    actor: String(data?.actor ?? ""),
+    actorUid: String(data?.actorUid ?? ""),
+    actorEmail: String(data?.actorEmail ?? ""),
+    createdAt,
+    ...(data?.importLogId ? { importLogId: String(data.importLogId) } : {})
+  };
+}
+
+function timestampIso(value: unknown) {
+  if (!value || typeof value !== "object" || !("toDate" in value)) return "";
+  const toDate = (value as { toDate?: () => Date }).toDate;
+  if (typeof toDate !== "function") return "";
+  const date = toDate.call(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : "";
+}
+
+function optionalAssignment(value: unknown, label: string) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value !== "string" || value.trim().length > 80) {
+    throw new HttpsError("invalid-argument", `Choose a valid ${label}.`);
+  }
+  return value.trim();
+}
+
+function claimText(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 async function queueInvitationEmail(input: {

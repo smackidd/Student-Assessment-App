@@ -24,11 +24,11 @@ describe("ORF calculations", () => {
   it("only calculates ORF percentile when median is below 50", () => {
     expect(calculateOrfPercentile(54)).toBeNull();
     expect(calculateOrfPercentile(50)).toBeNull();
-    expect(calculateOrfPercentile(45)).toBe(25);
-    expect(calculateOrfPercentile(33)).toBe(16);
-    expect(calculateOrfPercentile(23)).toBe(10);
-    expect(calculateOrfPercentile(12)).toBe(5);
-    expect(calculateOrfPercentile(7)).toBe(1);
+    expect(calculateOrfPercentile(45)).toBeNull();
+    expect(calculateOrfPercentile(33)).toBeNull();
+    expect(calculateOrfPercentile(23)).toBeNull();
+    expect(calculateOrfPercentile(12)).toBeNull();
+    expect(calculateOrfPercentile(7)).toBeNull();
   });
 
   it("calculates a full ORF round", () => {
@@ -40,6 +40,6 @@ describe("ORF calculations", () => {
 
     expect(result.cwpmValues).toEqual([24, 32, 20]);
     expect(result.median).toBe(24);
-    expect(result.percentile).toBe(10);
+    expect(result.percentile).toBeNull();
   });
 });

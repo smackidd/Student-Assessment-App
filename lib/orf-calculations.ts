@@ -24,15 +24,10 @@ export function calculateMedian(values: Array<number | null | undefined>) {
   return (sorted[midpoint - 1] + sorted[midpoint]) / 2;
 }
 
-export function calculateOrfPercentile(median?: number | null) {
-  if (typeof median !== "number") return null;
-  if (median >= 50) return null;
-
-  if (median >= 40) return 25;
-  if (median >= 30) return 16;
-  if (median >= 20) return 10;
-  if (median >= 10) return 5;
-  return 1;
+export function calculateOrfPercentile(_median?: number | null) {
+  // Percentiles are intentionally suppressed until an approved, grade- and
+  // window-specific norms source is licensed, versioned, and validated.
+  return null;
 }
 
 export function calculateOrfRound(passages: OrfPassage[]) {
