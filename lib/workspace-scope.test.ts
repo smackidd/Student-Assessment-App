@@ -89,7 +89,20 @@ function workspace(): WorkspaceState {
     pendingStudentSync: true,
     teamMembers: [{ id: "admin" }],
     auditEvents: [{ id: "audit" }],
-    importLogs: [{ id: "import" }]
+    importLogs: [{
+      id: "import",
+      fileName: "students.xlsx",
+      addedStudentIds: ["student-a"],
+      addedRows: [{ id: "student-a", student: "Alex A", homeroom: "3A" }],
+      addedPlacements: [
+        { studentId: "student-a", schoolYear: "2026-2027", grade: "3", homeroom: "3A" }
+      ],
+      updatedRows: [{
+        studentId: "student-b",
+        previousRow: { id: "student-b", student: "Blake B", homeroom: "3B" },
+        nextRow: { id: "student-b", student: "Blake B", homeroom: "3B" }
+      }]
+    }]
   };
 }
 
@@ -164,7 +177,7 @@ describe("workspace evaluator scope", () => {
     );
   });
 
-  it("keeps Admin reads and writes unfiltered", () => {
+  it("compacts Admin import history in transit and preserves full server rollback snapshots on save", () => {
     const state = workspace();
     const admin: WorkspaceAccess = {
       uid: "admin",
@@ -174,7 +187,28 @@ describe("workspace evaluator scope", () => {
       grade: "",
       homeroom: ""
     };
-    expect(scopeWorkspaceForAccess(state, admin)).toBe(state);
-    expect(mergeWorkspaceForAccess(state, state, admin)).toBe(state);
+    const scoped = scopeWorkspaceForAccess(state, admin);
+    expect(scoped).not.toBe(state);
+    expect(scoped.importLogs?.[0]).toMatchObject({
+      id: "import",
+      addedStudentIds: [],
+      addedRows: [],
+      addedPlacements: [],
+      updatedRows: []
+    });
+
+    const newImport = {
+      id: "new-import",
+      fileName: "new-students.xlsx",
+      addedStudentIds: ["student-b"],
+      addedRows: [{ id: "student-b", student: "Blake B", homeroom: "3B" }],
+      addedPlacements: [],
+      updatedRows: []
+    };
+    const proposed = { ...scoped, importLogs: [newImport, ...(scoped.importLogs ?? [])] };
+    const merged = mergeWorkspaceForAccess(state, proposed, admin);
+
+    expect(merged.importLogs?.[0]).toEqual(newImport);
+    expect(merged.importLogs?.[1]).toEqual(state.importLogs?.[0]);
   });
 });

@@ -325,7 +325,7 @@ export const recordAuditEvent = onCall(
   }
 );
 
-export const loadAuthorizedWorkspaceState = onCall({ region }, async (request) => {
+export const loadAuthorizedWorkspaceState = onCall({ region, memory: "512MiB" }, async (request) => {
   const access = await workspaceAccessFor(request);
   const workspace = await loadWorkspaceRecord();
   if (!workspace) return { state: null, version: null };
@@ -337,7 +337,7 @@ export const loadAuthorizedWorkspaceState = onCall({ region }, async (request) =
 });
 
 export const saveAuthorizedWorkspaceState = onCall(
-  { region },
+  { region, memory: "1GiB" },
   async (request: CallableRequest<SaveWorkspaceRequest>) => {
     const access = await workspaceAccessFor(request);
     const proposed = authorizedWorkspaceState(request.data.state);
@@ -396,9 +396,12 @@ export const syncOrganizationStudents = onCall(
 );
 
 export const revertSpreadsheetImport = onCall(
-  { region },
+  { region, memory: "1GiB" },
   async (request: CallableRequest<RevertImportRequest>) => {
-    const admin = requireAdmin(request);
+    const admin = await workspaceAccessFor(request);
+    if (admin.role !== "admin") {
+      throw new HttpsError("permission-denied", "Only an Admin can perform this action.");
+    }
     const importLogId = requiredAuditEventId(request.data.importLogId);
     return withWorkspaceLock(admin.uid, async () => {
       const currentRecord = await loadWorkspaceRecord();
@@ -412,7 +415,7 @@ export const revertSpreadsheetImport = onCall(
         return null;
       });
       return {
-        state: saved.stateJson,
+        state: authorizedWorkspaceForAccess(authorizedWorkspaceState(saved.stateJson), admin),
         version: saved.updatedAt,
         importLogId,
         deletedStudentCount: plan.studentNumbers.length,

@@ -103,7 +103,7 @@ export function parseWorkspaceState(value: unknown): WorkspaceState {
 }
 
 export function scopeWorkspaceForAccess(state: WorkspaceState, access: WorkspaceAccess): WorkspaceState {
-  if (access.role === "admin") return state;
+  if (access.role === "admin") return compactAdminWorkspace(state);
   const scope = teacherScope(state, access);
   const scopedTemplates = scope.templates.map((template) => ({
     ...template,
@@ -155,7 +155,7 @@ export function mergeWorkspaceForAccess(
   proposed: WorkspaceState,
   access: WorkspaceAccess
 ): WorkspaceState {
-  if (access.role === "admin") return proposed;
+  if (access.role === "admin") return mergeAdminWorkspace(current, proposed);
   if (!current) {
     throw new WorkspaceScopeError("failed-precondition", "An Admin must initialize the workspace before evaluators can save results.");
   }
@@ -186,6 +186,50 @@ export function mergeWorkspaceForAccess(
   });
 
   return { ...current, rows, pendingStudentSync: current.pendingStudentSync ?? false };
+}
+
+function compactAdminWorkspace(state: WorkspaceState): WorkspaceState {
+  if (!Array.isArray(state.importLogs)) return state;
+  return {
+    ...state,
+    importLogs: state.importLogs.map((log) => {
+      if (!isRecord(log)) return log;
+      return {
+        ...log,
+        addedStudentIds: [],
+        addedRows: [],
+        addedPlacements: [],
+        updatedRows: []
+      };
+    })
+  };
+}
+
+function mergeAdminWorkspace(current: WorkspaceState | null, proposed: WorkspaceState): WorkspaceState {
+  if (!current || !Array.isArray(current.importLogs)) return proposed;
+
+  const proposedLogs = Array.isArray(proposed.importLogs) ? proposed.importLogs : [];
+  const currentLogsById = new Map(
+    current.importLogs
+      .map((log) => [recordId(log), log] as const)
+      .filter((entry): entry is [string, unknown] => Boolean(entry[0]))
+  );
+  const proposedIds = new Set(proposedLogs.map(recordId).filter((id): id is string => Boolean(id)));
+  const importLogs = proposedLogs.map((log) => {
+    const id = recordId(log);
+    return id && currentLogsById.has(id) ? currentLogsById.get(id) : log;
+  });
+
+  for (const log of current.importLogs) {
+    const id = recordId(log);
+    if (!id || !proposedIds.has(id)) importLogs.push(log);
+  }
+
+  return { ...proposed, importLogs };
+}
+
+function recordId(value: unknown) {
+  return isRecord(value) && typeof value.id === "string" && value.id.trim() ? value.id : null;
 }
 
 function teacherScope(state: WorkspaceState, access: WorkspaceAccess) {
