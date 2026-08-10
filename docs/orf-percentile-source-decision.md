@@ -1,20 +1,41 @@
 # ORF percentile norm-source decision
 
-## Why the current calculation cannot be released
+## Current testing implementation
 
-The existing generic `orf_percentile` calculation is a placeholder. It does not use grade or assessment window and its fixed WCPM bands are not an authoritative percentile table.
+APP-093 was completed for testing on 2026-08-10 with the project owner's authorization to use the closest aligned public norms until the school confirms its policy.
 
-No single reviewed source supports the app's current generic protocol across grades 3–12:
+The app exposes three explicit, test-only calculation keys:
 
-- Hasbrouck and Tindal's 2017 compiled ORF norms provide selected benchmark percentiles for grades 1–6 and specific fall, winter, and spring windows. They do not provide exact 1–99 ranks for every grade/window used by this app.
-- FastBridge publishes instrument-specific CBMreading percentile tables for supported grades. Those norms are appropriate only when the school uses that licensed instrument, passages, administration rules, and scoring protocol.
-- Neither source authorizes silently extending percentile values into grades 9–12.
+- `orf_percentile_fastbridge2019_fall_test`
+- `orf_percentile_fastbridge2019_winter_test`
+- `orf_percentile_fastbridge2019_spring_test`
 
-Returning a precise percentile without a compatible source would create false assessment data. Unsupported combinations must show **Unavailable for this grade/window**, not a fabricated value.
+The provisional lookup uses the public FastBridge CBMreading 2019 score-to-percentile tables for grades 3-8. It retains the requested school rule that percentile stays blank when raw `ORF_MED >= 50`. Because that rule makes higher thresholds unreachable, the app embeds only the exact published thresholds below 50 CWPM and returns the highest percentile whose threshold is less than or equal to the median.
 
-## School decision required
+Additional boundaries:
 
-The school must record:
+- All three passage CWPM values must be present before percentile is calculated.
+- `ORF_MED` remains the median of the three `max(WPM - EPM, 0)` passage values.
+- Grades 9-12 remain unavailable rather than extrapolating grade-8 norms.
+- Existing saved `orf_percentile` fields are migrated in memory to the three seasonal testing keys.
+- Results are provisional testing estimates, not a finalized school-approved norm interpretation.
+
+Testing source:
+
+- FastBridge CBMreading score-to-percentile tables: <https://support-content.fastbridge.org/KB_Articles/CBMreading_percent_ranking_1-99_2019.pdf>
+- FastBridge screening protocol: <https://fastbridge.illuminateed.com/hc/en-us/articles/1260802463470-Screening-Basics>
+
+## Why this is not yet a production policy
+
+No single reviewed source supports the app's generic protocol across grades 3-12:
+
+- Hasbrouck and Tindal's 2017 compiled ORF norms provide selected benchmark percentiles for grades 1-6 and specific fall, winter, and spring windows. They do not provide exact 1-99 ranks for every grade/window used by this app.
+- FastBridge publishes instrument-specific CBMreading percentile tables through grade 8. Those norms are appropriate as validated results only when the school uses that instrument, passages, administration rules, and scoring protocol.
+- Neither source authorizes silently extending percentile values into grades 9-12.
+
+## School confirmation still required
+
+Before the testing keys are promoted or renamed for production, the school must record:
 
 1. The assessment instrument and edition.
 2. The authorized norm source and version.
@@ -24,17 +45,14 @@ The school must record:
 6. Whether the UI should display source-provided benchmark bands or an explicitly approved interpolation.
 7. Licensing or redistribution limits for embedding the table in software.
 
-## Implementation contract after approval
+## Production replacement contract
 
-- Add a versioned norm registry containing source, version, URL, protocol, supported grades/windows, and thresholds.
-- Use explicit calculation keys such as `orf_percentile_ht2017_fall`; never reinterpret the legacy generic key.
-- Pass grade, window, raw metric, source key, and source version into the calculation.
+- Replace the `_test` keys with school-approved, versioned source keys; never reinterpret the legacy generic key silently.
+- Store the source key and version with every persisted result so later norm updates do not rewrite history.
 - Expose only compatible keys in Assessment Builder.
-- Keep all percentile outputs calculated and read-only.
-- Store the source key and version with every persisted result so later norm updates do not rewrite history silently.
-- Unit-test each supported threshold boundary and every unsupported grade/window combination.
+- Keep percentile outputs calculated and read-only.
+- Unit-test every supported threshold boundary and unsupported grade/window combination.
 
-Reviewed sources:
+Other reviewed source:
 
 - Hasbrouck and Tindal technical report: <https://files.eric.ed.gov/fulltext/ED605146.pdf>
-- FastBridge CBMreading percentile table: <https://support-content.fastbridge.org/KB_Articles/CBMreading_percent_ranking_1-99_2019.pdf>

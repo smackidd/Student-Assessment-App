@@ -1,9 +1,27 @@
 import { getApps, initializeApp } from "firebase/app";
 
+const appEnvironment = process.env.NEXT_PUBLIC_APP_ENV;
+const firebaseProjectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+
+const expectedProjectIds: Record<string, string> = {
+  production: "student-assessment-2d869",
+  test: "student-assessment-test"
+};
+
+if (
+  appEnvironment &&
+  expectedProjectIds[appEnvironment] &&
+  firebaseProjectId !== expectedProjectIds[appEnvironment]
+) {
+  throw new Error(
+    `Firebase environment mismatch: ${appEnvironment} must use ${expectedProjectIds[appEnvironment]}.`
+  );
+}
+
 export const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
   authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  projectId: firebaseProjectId,
   storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,

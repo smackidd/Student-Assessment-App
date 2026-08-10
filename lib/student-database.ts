@@ -1,29 +1,19 @@
-import { executeMutation, executeQuery, getDataConnect, mutationRef, queryRef } from "firebase/data-connect";
+import { executeQuery, getDataConnect, queryRef } from "firebase/data-connect";
 import { getAuth } from "firebase/auth";
+import { getFunctions, httpsCallable } from "firebase/functions";
 import { dataConnectConfig, firebaseApp } from "@/lib/firebase";
 import type { AssessmentTemplate } from "@/lib/assessment-templates";
 import type { OrganizationAuditEvent } from "@/lib/audit-events";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
 import {
-  buildStudentSavePlan,
   displayNameFor,
-  runInBatches,
-  type PersistedStudent,
-  type StudentSaveAction
+  type PersistedStudent
 } from "@/lib/student-save-planner";
 
 type SavedStudent = PersistedStudent;
 
 type ListStudentsResult = {
   students: SavedStudent[];
-};
-
-type CreateStudentResult = {
-  student_insert: SavedStudent;
-};
-
-type UpdateStudentNameResult = {
-  student_update: SavedStudent;
 };
 
 type PrototypeWorkspaceState = {
@@ -79,39 +69,67 @@ type PrototypeWorkspaceState = {
   }>;
 };
 
-type GetPrototypeWorkspaceStateResult = {
-  prototypeWorkspaceState?: {
-    id: string;
-    stateJson: PrototypeWorkspaceState;
-    updatedAt: string;
-  } | null;
+type LoadAuthorizedWorkspaceStateResult = {
+  state: PrototypeWorkspaceState | null;
+  version: string | null;
 };
 
-type SavePrototypeWorkspaceStateResult = {
-  prototypeWorkspaceState_upsert: {
-    id: string;
-    stateJson: PrototypeWorkspaceState;
-    updatedAt: string;
-  };
+type SaveAuthorizedWorkspaceStateResult = {
+  state: PrototypeWorkspaceState;
+  version: string;
+};
+
+type RevertSpreadsheetImportResult = {
+  state: PrototypeWorkspaceState;
+  version: string;
+  importLogId: string;
+  deletedStudentCount: number;
+  auditSaved: boolean;
+  event?: OrganizationAuditEvent;
 };
 
 const dataConnect = getDataConnect(firebaseApp, dataConnectConfig);
-const STUDENT_WRITE_BATCH_SIZE = 8;
+let loadedWorkspaceVersion: string | null | undefined;
 
 export async function loadPrototypeWorkspaceState(id = "main") {
   await ensureFirebaseUser();
-  const result = await executeQuery<GetPrototypeWorkspaceStateResult, { id: string }>(
-    queryRef(dataConnect, "GetPrototypeWorkspaceState", { id }),
-    { fetchPolicy: "SERVER_ONLY" }
+  assertMainWorkspace(id);
+  const loadWorkspace = httpsCallable<Record<string, never>, LoadAuthorizedWorkspaceStateResult>(
+    workspaceFunctions(),
+    "loadAuthorizedWorkspaceState"
   );
-  return result.data.prototypeWorkspaceState?.stateJson ?? null;
+  const result = await loadWorkspace({});
+  loadedWorkspaceVersion = result.data.version;
+  return result.data.state;
 }
 
 export async function savePrototypeWorkspaceState(state: PrototypeWorkspaceState, id = "main") {
   await ensureFirebaseUser();
-  await executeMutation<SavePrototypeWorkspaceStateResult, { id: string; stateJson: PrototypeWorkspaceState }>(
-    mutationRef(dataConnect, "SavePrototypeWorkspaceState", { id, stateJson: state })
+  assertMainWorkspace(id);
+  if (typeof loadedWorkspaceVersion === "undefined") {
+    throw new Error("Reload the workspace before saving changes.");
+  }
+  const saveWorkspace = httpsCallable<
+    { state: PrototypeWorkspaceState; version: string | null },
+    SaveAuthorizedWorkspaceStateResult
+  >(
+    workspaceFunctions(),
+    "saveAuthorizedWorkspaceState"
   );
+  const result = await saveWorkspace({ state, version: loadedWorkspaceVersion });
+  loadedWorkspaceVersion = result.data.version;
+  return result.data.state;
+}
+
+export async function revertSpreadsheetImport(importLogId: string) {
+  await ensureFirebaseUser();
+  const revertImport = httpsCallable<{ importLogId: string }, RevertSpreadsheetImportResult>(
+    workspaceFunctions(),
+    "revertSpreadsheetImport"
+  );
+  const result = await revertImport({ importLogId });
+  loadedWorkspaceVersion = result.data.version;
+  return result.data;
 }
 
 export async function loadStudentsFromDatabase() {
@@ -135,62 +153,13 @@ export async function loadStudentsFromDatabase() {
 }
 
 export async function saveStudentsToDatabase(rows: OrfResultRow[]) {
-  const startedAt = Date.now();
   await ensureFirebaseUser();
-  const existing = await executeQuery<ListStudentsResult, undefined>(queryRef(dataConnect, "ListStudents"), {
-    fetchPolicy: "SERVER_ONLY"
-  });
-  const plan = buildStudentSavePlan(rows, existing.data.students);
-  const results = await runInBatches(plan.actions, STUDENT_WRITE_BATCH_SIZE, executeStudentSaveAction);
-  const createdCount = results.filter((result) => result === "created").length;
-  const updatedCount = results.filter((result) => result === "updated").length;
-
-  return {
-    createdCount,
-    updatedCount,
-    skippedCount: plan.skippedCount,
-    batchCount: Math.ceil(plan.actions.length / STUDENT_WRITE_BATCH_SIZE),
-    durationMs: Date.now() - startedAt
-  };
-}
-
-async function executeStudentSaveAction(action: StudentSaveAction): Promise<"created" | "updated"> {
-  if (action.kind === "update") {
-    await executeMutation<UpdateStudentNameResult, typeof action.variables>(
-      mutationRef(dataConnect, "UpdateStudentName", action.variables)
-    );
-    return "updated";
-  }
-
-  try {
-    await executeMutation<CreateStudentResult, typeof action.variables>(
-      mutationRef(dataConnect, "CreateStudent", action.variables)
-    );
-    return "created";
-  } catch (error) {
-    if (!isAlreadyExistsError(error)) throw error;
-
-    const refreshed = await executeQuery<ListStudentsResult, undefined>(queryRef(dataConnect, "ListStudents"), {
-      fetchPolicy: "SERVER_ONLY"
-    });
-    const savedStudent = refreshed.data.students.find((student) => student.studentNumber === action.studentNumber);
-    if (!savedStudent) throw error;
-
-    await executeMutation<UpdateStudentNameResult, UpdateStudentVariables>(
-      mutationRef(dataConnect, "UpdateStudentName", {
-        studentId: savedStudent.id,
-        firstName: action.variables.firstName,
-        lastName: action.variables.lastName,
-        preferredName: action.variables.preferredName
-      })
-    );
-    return "updated";
-  }
-}
-
-function isAlreadyExistsError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error ?? "");
-  return message.includes("student_studentNumber_uidx") || message.includes("ALREADY_EXISTS");
+  const syncStudents = httpsCallable<
+    { students: Array<{ id: string; student: string }> },
+    { createdCount: number; updatedCount: number; skippedCount: number; batchCount: number; durationMs: number }
+  >(workspaceFunctions(), "syncOrganizationStudents");
+  const result = await syncStudents({ students: rows.map(({ id, student }) => ({ id, student })) });
+  return result.data;
 }
 
 async function ensureFirebaseUser() {
@@ -200,9 +169,13 @@ async function ensureFirebaseUser() {
   throw new Error("Please sign in before saving or loading Firebase data.");
 }
 
-type UpdateStudentVariables = {
-  studentId: string;
-  firstName: string;
-  lastName: string;
-  preferredName?: string | null;
-};
+function workspaceFunctions() {
+  return getFunctions(
+    firebaseApp,
+    process.env.NEXT_PUBLIC_FIREBASE_FUNCTIONS_REGION ?? "northamerica-northeast1"
+  );
+}
+
+function assertMainWorkspace(id: string) {
+  if (id !== "main") throw new Error("Only the authorized main workspace is available.");
+}

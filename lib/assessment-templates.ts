@@ -1,3 +1,5 @@
+import { ORF_PERCENTILE_CALCULATION_KEYS, type OrfPercentileWindow } from "@/lib/orf-calculations";
+
 export type AssessmentDataType = "integer" | "percentage" | "letter" | "text" | "date" | "file" | "calculated";
 export type Visibility = "evaluators" | "vice-principal" | "admin";
 
@@ -114,13 +116,36 @@ export const assessmentTemplates: AssessmentTemplate[] = [
         visibility: "evaluators"
       },
       {
-        id: "percentile",
+        id: "percentile-fall",
         name: "%ile",
-        slug: "percentile",
+        slug: "percentile-fall",
         dataType: "calculated",
+        roundIds: ["fall"],
         isRequired: false,
         isCalculated: true,
-        calculationKey: "orf_percentile",
+        calculationKey: ORF_PERCENTILE_CALCULATION_KEYS.fall,
+        visibility: "evaluators"
+      },
+      {
+        id: "percentile-winter",
+        name: "%ile",
+        slug: "percentile-winter",
+        dataType: "calculated",
+        roundIds: ["winter"],
+        isRequired: false,
+        isCalculated: true,
+        calculationKey: ORF_PERCENTILE_CALCULATION_KEYS.winter,
+        visibility: "evaluators"
+      },
+      {
+        id: "percentile-spring",
+        name: "%ile",
+        slug: "percentile-spring",
+        dataType: "calculated",
+        roundIds: ["spring"],
+        isRequired: false,
+        isCalculated: true,
+        calculationKey: ORF_PERCENTILE_CALCULATION_KEYS.spring,
         visibility: "evaluators"
       }
     ]
@@ -244,11 +269,15 @@ export const emptyCustomTemplate: AssessmentTemplate = {
 
 export function normalizeAssessmentTemplates(templates: AssessmentTemplate[]) {
   return templates.map((template) => {
-    if (template.id !== "quick-write") return template;
+    const normalizedTemplate = template.id === "orf"
+      ? { ...template, fields: normalizeLegacyOrfPercentileFields(template) }
+      : template;
+
+    if (normalizedTemplate.id !== "quick-write") return normalizedTemplate;
 
     return {
-      ...template,
-      fields: template.fields.map((field) => {
+      ...normalizedTemplate,
+      fields: normalizedTemplate.fields.map((field) => {
         const isQuickWritePercentile =
           field.calculationKey === "quick_write_percentile" ||
           field.id === "quick-write-percentile" ||
@@ -265,5 +294,26 @@ export function normalizeAssessmentTemplates(templates: AssessmentTemplate[]) {
           : field;
       })
     };
+  });
+}
+
+function normalizeLegacyOrfPercentileFields(template: AssessmentTemplate) {
+  return template.fields.flatMap((field) => {
+    if (field.calculationKey !== "orf_percentile") return [field];
+
+    const supportedRounds = template.rounds.filter((round) => {
+      const isSupportedWindow = round.id in ORF_PERCENTILE_CALCULATION_KEYS;
+      const isAssignedToField = !field.roundIds?.length || field.roundIds.includes(round.id);
+      return isSupportedWindow && isAssignedToField;
+    });
+    if (!supportedRounds.length) return [field];
+
+    return supportedRounds.map((round) => ({
+      ...field,
+      id: `${field.id}-${round.id}`,
+      slug: `${field.slug}-${round.id}`,
+      roundIds: [round.id],
+      calculationKey: ORF_PERCENTILE_CALCULATION_KEYS[round.id as OrfPercentileWindow]
+    }));
   });
 }

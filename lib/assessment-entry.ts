@@ -4,7 +4,12 @@ import {
   type AssessmentSectionTemplate,
   type AssessmentTemplate
 } from "@/lib/assessment-templates";
-import { calculateCwpm, calculateMedian, calculateOrfPercentile } from "@/lib/orf-calculations";
+import {
+  calculateCwpm,
+  calculateMedian,
+  calculateOrfPercentile,
+  resolveOrfPercentileCalculationKey
+} from "@/lib/orf-calculations";
 import { hydrateOrfRow, type AssessmentValue, type AssessmentValueMap, type OrfResultRow } from "@/lib/sample-results";
 
 export type EntryRow = OrfResultRow & Record<string, AssessmentValue | AssessmentValueMap | undefined>;
@@ -240,6 +245,11 @@ export function calculateOrfWindow(
   const wpmField = assessment.fields.find((field) => assessmentFieldMeaning(field) === "wpm");
   const epmField = assessment.fields.find((field) => assessmentFieldMeaning(field) === "epm");
   const cwpmField = assessment.fields.find((field) => assessmentFieldMeaning(field) === "cwpm");
+  const percentileField = assessment.fields.find(
+    (field) =>
+      assessmentFieldMeaning(field) === "percentile" &&
+      (!field.roundIds?.length || field.roundIds.includes(round.id))
+  );
   const useLegacyFallback = !hasScopedAssessmentContext(context);
 
   const passages = [0, 1, 2].map((index) => {
@@ -286,11 +296,15 @@ export function calculateOrfWindow(
     };
   });
   const median = calculateMedian(passages.map((passage) => passage.cwpm));
+  const hasThreePassages = passages.every((passage) => typeof passage.cwpm === "number");
+  const percentileCalculationKey = resolveOrfPercentileCalculationKey(percentileField?.calculationKey, round.id);
 
   return {
     passages,
     median,
-    percentile: calculateOrfPercentile(median)
+    percentile: hasThreePassages
+      ? calculateOrfPercentile(median, context.grade, percentileCalculationKey)
+      : null
   };
 }
 
@@ -610,7 +624,12 @@ function assessmentFieldMeaning(field: AssessmentFieldTemplate) {
   if (candidates.some((value) => value === "median" || value === "med" || value === "orf_med")) return "median";
   if (candidates.some((value) => value === "quick_write_percentile" || value === "quick_write_ile")) return "quick_write_percentile";
   if (candidates.some((value) => value === "percentage" || value === "percent" || value === "pct")) return "percentage";
-  if (candidates.some((value) => value === "orf_percentile" || value === "percentile" || value === "ile")) return "percentile";
+  if (candidates.some((value) =>
+    value === "orf_percentile" ||
+    value.startsWith("orf_percentile_fastbridge2019_") ||
+    value === "percentile" ||
+    value === "ile"
+  )) return "percentile";
   if (candidates.some((value) => value === "wpm")) return "wpm";
   if (candidates.some((value) => value === "epm")) return "epm";
   if (candidates.some((value) => value === "tww")) return "tww";

@@ -2254,6 +2254,18 @@ textarea {
   padding: 6px 9px;
 }
 
+.audit-pending-row {
+  background: #fff8df;
+}
+
+.audit-retry-action {
+  min-height: 30px;
+  padding: 6px 9px;
+  border-color: #c88b16;
+  background: #fff1bf;
+  color: #725312;
+}
+
 .assessment-like-table .audit-table-row:last-child {
   border-bottom: 0;
 }

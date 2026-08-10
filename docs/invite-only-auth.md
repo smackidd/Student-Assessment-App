@@ -66,9 +66,11 @@ The `inviteUser` callable writes the invitation message to the server-only
 Firestore `mail` collection. The Trigger Email extension sends the queued
 message through Gmail SMTP and records delivery status on the mail document.
 
-## Required SQL Connect hardening
+## SQL Connect hardening and APP-079 rollout
 
-The current prototype connector still has operations authorized with broad `@auth(level: USER)` rules. That means hiding screens in the browser is not a complete data-security boundary.
+APP-079 now routes full-workspace reads and writes through authenticated callable Functions. The server returns the complete workspace only to Admins. A Teacher / EA receives only the current school year, assigned grade and home room, matching students, assessments whose grade scope includes the assignment, and evaluator-visible fields. Teacher / EA saves can change only non-calculated assessment values in that exact scope; roster, placement, template, historical-year, restricted-field, import, audit, and team data are server-owned.
+
+The callable layer serializes workspace writes with a short Firestore lease and rejects stale workspace versions, preventing an evaluator save from overwriting a newer Admin or evaluator save. The browser no longer calls the full-workspace SQL Connect operations directly.
 
 Before production, every authenticated SQL Connect operation must also require the organization claim:
 
@@ -86,7 +88,19 @@ Admin-only operations must require:
 )
 ```
 
-At minimum, review and replace the broad authorization on `ListStudents`, `GetPrototypeWorkspaceState`, `CreateStudent`, `UpdateStudentName`, and `SavePrototypeWorkspaceState`. Cloud Storage rules should use the same claims. The current connector lives outside this nested Git repository, so that deployment change is intentionally not mixed into this feature branch.
+The connector source now makes `GetPrototypeWorkspaceState` and `SavePrototypeWorkspaceState` `NO_ACCESS`, allowing only the Admin SDK in the trusted callable Functions to execute them. `ListStudents`, `CreateStudent`, and `UpdateStudentName` require the organization Admin claim. Unused definition-list operations that could expose years or restricted assessment fields are also `NO_ACCESS`.
+
+Deploy these changes in this order so existing production data remains intact and older clients are not locked out before the replacement path exists:
+
+1. Deploy `loadAuthorizedWorkspaceState` and `saveAuthorizedWorkspaceState` from the `invite-auth` Functions codebase.
+2. Deploy the web application that uses the callable workspace API.
+3. Verify one Admin and one assigned Teacher / EA can load and save through the callable API.
+4. Deploy the SQL Connect connector authorization changes last.
+5. Repeat the negative tests: the Teacher / EA cannot retrieve another room, another grade, a prior year, an Admin-only field, or modify roster/placement data.
+
+This rollout does not rewrite or delete the existing `PrototypeWorkspaceState/main` row. Normalizing that JSON into the relational enrollment/result tables remains a later data-model migration, not a prerequisite for the callable server boundary.
+
+Cloud Storage rules must be migrated separately to the same `organizationId`, `role`, and classroom-scope claims before evaluator file fields are enabled.
 
 ## Security assessment
 

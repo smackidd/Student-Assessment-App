@@ -2,6 +2,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { flushSync } from "react-dom";
 import { AgGridReact } from "ag-grid-react";
 import {
   AllCommunityModule,
@@ -58,8 +59,10 @@ import {
   validateAssessmentValue,
   type EntryRow
 } from "@/lib/assessment-entry";
+import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
 import {
   loadPrototypeWorkspaceState,
+  revertSpreadsheetImport,
   savePrototypeWorkspaceState,
   saveStudentsToDatabase
 } from "@/lib/student-database";
@@ -83,6 +86,12 @@ import {
   type OrganizationAuditEvent
 } from "@/lib/audit-events";
 import { recordOrganizationAuditEvent, watchOrganizationAuditEvents } from "@/lib/audit-log";
+import {
+  queueAuditEvent,
+  readAuditOutbox,
+  reconcileAuditOutbox,
+  removeAuditEventFromOutbox
+} from "@/lib/audit-outbox";
 import {
   readNavigationPreference,
   writeNavigationPreference,
@@ -115,9 +124,19 @@ const predefinedCalculations = [
     description: "Calculates the MED of all CWPM values for the current window."
   },
   {
-    key: "orf_percentile",
-    label: "ORF_Percentile",
-    description: "Applies the ORF percentile to the current window only when the current window MED is below 50."
+    key: ORF_PERCENTILE_CALCULATION_KEYS.fall,
+    label: "ORF %ile — Fall (test)",
+    description: "Applies provisional FastBridge 2019 fall thresholds for grades 3-8 when ORF MED is below 50."
+  },
+  {
+    key: ORF_PERCENTILE_CALCULATION_KEYS.winter,
+    label: "ORF %ile — Winter (test)",
+    description: "Applies provisional FastBridge 2019 winter thresholds for grades 3-8 when ORF MED is below 50."
+  },
+  {
+    key: ORF_PERCENTILE_CALCULATION_KEYS.spring,
+    label: "ORF %ile — Spring (test)",
+    description: "Applies provisional FastBridge 2019 spring thresholds for grades 3-8 when ORF MED is below 50."
   },
   {
     key: "quick_write_percentile",
@@ -226,6 +245,8 @@ export default function StudentEvaluationApp() {
       actor: "Codex"
     }
   ]);
+  const [pendingAuditEventIds, setPendingAuditEventIds] = useState<Set<string>>(new Set());
+  const [retryingAuditEventId, setRetryingAuditEventId] = useState<string | null>(null);
   const [notes, setNotes] = useState<StudentNote[]>([
     {
       id: "note-1",
@@ -348,6 +369,7 @@ export default function StudentEvaluationApp() {
           setOrganizationAccess("checking");
           setWorkspaceReadyForUid(null);
           setNavigationReadyForUid(null);
+          setPendingAuditEventIds(new Set());
         }
 
         if (!user) {
@@ -355,6 +377,12 @@ export default function StudentEvaluationApp() {
           setOrganizationAccess("uninvited");
           setAuthReady(true);
           return;
+        }
+
+        if (accountChanged) {
+          const pendingEvents = readAuditOutbox(user.uid);
+          setPendingAuditEventIds(new Set(pendingEvents.map((event) => event.id)));
+          setAuditEvents((current) => mergeAuditEvents(current, pendingEvents));
         }
 
         const fallbackName = user.displayName || user.email?.split("@")[0] || "Team Member";
@@ -484,7 +512,14 @@ export default function StudentEvaluationApp() {
   useEffect(() => {
     if (!authUser || organizationAccess !== "active" || !isAdmin) return;
     return watchOrganizationAuditEvents(
-      (cloudEvents) => setAuditEvents((current) => mergeAuditEvents(current, cloudEvents)),
+      (cloudEvents) => {
+        const pendingEvents = reconcileAuditOutbox(
+          authUser.uid,
+          new Set(cloudEvents.map((event) => event.id))
+        );
+        setPendingAuditEventIds(new Set(pendingEvents.map((event) => event.id)));
+        setAuditEvents((current) => mergeAuditEvents(current, cloudEvents, pendingEvents));
+      },
       (error) => console.error("Audit history could not be loaded from Firestore.", error)
     );
   }, [authUser, isAdmin, organizationAccess]);
@@ -508,7 +543,7 @@ export default function StudentEvaluationApp() {
           let normalizedSavedState = { ...savedState, templates: normalizedTemplates };
           let recoveredPendingStudentSync = false;
           let pendingStudentSyncError: Error | null = null;
-          if (savedState.pendingStudentSync) {
+          if (savedState.pendingStudentSync && isAdmin) {
             try {
               await saveStudentsToDatabase(savedState.rows);
               if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
@@ -574,7 +609,7 @@ export default function StudentEvaluationApp() {
     return () => {
       cancelled = true;
     };
-  }, [authReady, authUser, organizationAccess, workspaceReadyForUid]);
+  }, [authReady, authUser, isAdmin, organizationAccess, workspaceReadyForUid]);
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
@@ -739,33 +774,45 @@ export default function StudentEvaluationApp() {
         lockedOverviewYears,
         auditEvents,
         importLogs,
-        pendingStudentSync: true
+        pendingStudentSync: isAdmin
       };
-      await savePrototypeWorkspaceState(pendingWorkspaceState);
-      workspaceSavedWithPendingSync = pendingWorkspaceState;
-      setLastSavedWorkspaceState(pendingWorkspaceState);
-      const result = await saveStudentsToDatabase(rowsForSave);
-      const workspaceState: SavedWorkspaceState = {
-        ...pendingWorkspaceState,
-        pendingStudentSync: false
-      };
-      await savePrototypeWorkspaceState(workspaceState);
-      workspaceSavedWithPendingSync = null;
+      const firstSavedWorkspaceState = await savePrototypeWorkspaceState(pendingWorkspaceState);
+      let result = { createdCount: 0, updatedCount: 0 };
+      let workspaceState = firstSavedWorkspaceState;
+      if (isAdmin) {
+        workspaceSavedWithPendingSync = firstSavedWorkspaceState;
+        setLastSavedWorkspaceState(firstSavedWorkspaceState);
+        result = await saveStudentsToDatabase(rowsForSave);
+        workspaceState = await savePrototypeWorkspaceState({
+          ...firstSavedWorkspaceState,
+          pendingStudentSync: false
+        });
+        workspaceSavedWithPendingSync = null;
+      }
       setLastSavedWorkspaceState(workspaceState);
       if (activeView === "profile" && authUser && userProfile.name && userProfile.name !== authUser.displayName) {
         await updateProfile(authUser, { displayName: userProfile.name });
       }
-      setOrfRows(rowsForSave);
-      setOverviewPlacements(placementsForSave);
-      setDatabaseStudentOptions(buildStudentIdentityOptions(rowsForSave, placementsForSave));
+      setOrfRows(workspaceState.rows);
+      setOverviewPlacements(workspaceState.placements);
+      setDatabaseStudentOptions(buildStudentIdentityOptions(workspaceState.rows, workspaceState.placements));
       setOverviewChangedStudentIds(new Set());
       setSaveStatus("saved");
       setSaveMessage(
         activeView === "profile"
           ? "Saved profile data to Firebase."
+          : !isAdmin
+          ? "Saved assessment results for your assigned class."
           : `Saved to Firebase. ${result.createdCount} new student${result.createdCount === 1 ? "" : "s"} added; ${result.updatedCount} updated.`
       );
-      recordAudit("Saved table", "Firebase Data Connect", "Student table", "Saved visible student rows to the SQL Student table.");
+      recordAudit(
+        "Saved table",
+        "Firebase Data Connect",
+        isAdmin ? "Student table" : "Assigned assessment table",
+        isAdmin
+          ? "Saved visible student rows to the SQL Student table."
+          : "Saved evaluator-visible assessment results through the server-enforced classroom scope."
+      );
     } catch (error) {
       setSaveStatus("error");
       setSaveMessage(
@@ -1335,40 +1382,7 @@ export default function StudentEvaluationApp() {
 
     revertingImportIdsRef.current.add(importLogId);
     try {
-      if (importLog.addedStudentIds.length) {
-        throw new Error(
-          "This import created new SQL student records, so it cannot be safely reverted yet. No data was changed. An Admin must use the planned transactional Data Connect rollback after confirming the students have no later enrollments, notes, results, files, or reports."
-        );
-      }
-
-      const currentRowsById = new Map(orfRows.map((row) => [row.id, row]));
-      const changedAfterImport = importLog.updatedRows.filter((snapshot) => {
-        const currentRow = currentRowsById.get(snapshot.studentId);
-        return !currentRow || JSON.stringify(currentRow) !== JSON.stringify(snapshot.nextRow);
-      });
-      if (changedAfterImport.length) {
-        throw new Error(
-          `This import cannot be reverted because ${changedAfterImport.length} affected student record${changedAfterImport.length === 1 ? " has" : "s have"} changed since the import. No data was changed.`
-        );
-      }
-
-      const addedStudentIds = new Set(importLog.addedStudentIds);
-      const previousRowsById = new Map(importLog.updatedRows.map((snapshot) => [snapshot.studentId, snapshot.previousRow]));
-      const nextRows = orfRows
-        .filter((row) => !addedStudentIds.has(row.id))
-        .map((row) => previousRowsById.get(row.id) ?? row);
-      const nextPlacements = overviewPlacements.filter(
-        (placement) =>
-          !importLog.addedPlacements.some(
-            (added) =>
-              added.studentId === placement.studentId &&
-              added.schoolYear === placement.schoolYear &&
-              added.grade === placement.grade &&
-              added.homeroom === placement.homeroom
-          )
-      );
-      const revertedAt = new Date().toISOString();
-      const nextImportLogs = importLogs.map((log) => (log.id === importLogId ? { ...log, revertedAt } : log));
+      if (!isAdmin) throw new Error("Only an Admin can revert a spreadsheet import.");
       const revertAuditEvent = createAuditEvent(
         "Reverted import",
         "Overview import",
@@ -1376,55 +1390,24 @@ export default function StudentEvaluationApp() {
         `Reverted imported students and assessment values from ${importLog.fileName}.`,
         { importLogId, id: `audit-revert-${importLogId}` }
       );
-      const persistedWorkspaceState: SavedWorkspaceState = {
-        rows: nextRows,
-        placements: nextPlacements,
-        templates,
-        schoolYears,
-        lockedOverviewYears,
-        auditEvents,
-        importLogs: nextImportLogs
-      };
-
-      await savePrototypeWorkspaceState(persistedWorkspaceState);
-      try {
-        await saveStudentsToDatabase(nextRows);
-      } catch (error) {
-        try {
-          await savePrototypeWorkspaceState({
-            rows: orfRows,
-            placements: overviewPlacements,
-            templates,
-            schoolYears,
-            lockedOverviewYears,
-            auditEvents,
-            importLogs
-          });
-        } catch (restoreError) {
-          throw new AggregateError(
-            [error, restoreError],
-            "Rollback failed and the previous workspace could not be restored. An administrator must reconcile Firebase Data Connect before another rollback attempt."
-          );
-        }
-        throw new Error(
-          `Rollback was not completed because Firebase Data Connect could not be synchronized. The workspace was restored; press Save to reconcile SQL before retrying. ${error instanceof Error ? error.message : ""}`.trim()
-        );
-      }
-      const savedAuditEvent = await persistAuditEvent(revertAuditEvent);
+      const rollback = await revertSpreadsheetImport(importLogId);
+      const workspaceState = rollback.state as SavedWorkspaceState;
+      const revertedImportLog = workspaceState.importLogs?.find((log) => log.id === importLogId);
+      const revertedAt = revertedImportLog?.revertedAt ?? new Date().toISOString();
+      const savedAuditEvent = rollback.event ?? (await persistAuditEvent(revertAuditEvent));
       const nextAuditEvents = mergeAuditEvents(
         auditEvents.map((event) => (event.importLogId === importLogId ? { ...event, revertedAt } : event)),
         savedAuditEvent ? [savedAuditEvent] : []
       );
-      const workspaceState: SavedWorkspaceState = {
-        ...persistedWorkspaceState,
-        auditEvents: nextAuditEvents
-      };
-      setOrfRows(nextRows);
-      setOverviewPlacements(nextPlacements);
-      setImportLogs(nextImportLogs);
+      setOrfRows(workspaceState.rows);
+      setOverviewPlacements(workspaceState.placements);
+      setTemplates(workspaceState.templates);
+      setSchoolYears(workspaceState.schoolYears);
+      setLockedOverviewYears(workspaceState.lockedOverviewYears ?? []);
+      setImportLogs(workspaceState.importLogs ?? []);
       setAuditEvents((current) => mergeAuditEvents(nextAuditEvents, current));
-      setLastSavedWorkspaceState(workspaceState);
-      setDatabaseStudentOptions(buildStudentIdentityOptions(nextRows, nextPlacements));
+      setLastSavedWorkspaceState({ ...workspaceState, auditEvents: nextAuditEvents });
+      setDatabaseStudentOptions(buildStudentIdentityOptions(workspaceState.rows, workspaceState.placements));
       setOverviewChangedStudentIds(new Set());
       setSaveStatus("saved");
       setSaveMessage(
@@ -1463,20 +1446,41 @@ export default function StudentEvaluationApp() {
   }
 
   async function persistAuditEvent(event: AppAuditEvent) {
+    const authenticatedUid = getAuth(firebaseApp).currentUser?.uid;
+    if (!authenticatedUid) return null;
     try {
       const savedEvent = await recordOrganizationAuditEvent({
-      id: event.id,
+        id: event.id,
         eventType: event.eventType,
         entityType: event.entityType,
         entityLabel: event.entityLabel,
         description: event.description,
         ...(event.importLogId ? { importLogId: event.importLogId } : {})
       });
+      removeAuditEventFromOutbox(authenticatedUid, event.id);
+      setPendingAuditEventIds((current) => {
+        const next = new Set(current);
+        next.delete(event.id);
+        return next;
+      });
       setAuditEvents((current) => mergeAuditEvents(current, [savedEvent]));
       return savedEvent;
     } catch (error) {
       console.error("Audit event could not be saved to Firestore.", error);
+      queueAuditEvent(authenticatedUid, event);
+      setPendingAuditEventIds((current) => new Set(current).add(event.id));
       return null;
+    }
+  }
+
+  async function retryAuditEvent(eventId: string) {
+    const event = auditEvents.find((candidate) => candidate.id === eventId);
+    if (!event || !pendingAuditEventIds.has(eventId) || retryingAuditEventId) return;
+    setRetryingAuditEventId(eventId);
+    try {
+      await persistAuditEvent(event);
+    } finally {
+      setRetryingAuditEventId(null);
     }
   }
 
@@ -1756,6 +1760,9 @@ export default function StudentEvaluationApp() {
             assignmentHomerooms={teamAssignmentHomerooms(overviewPlacements, schoolYears[0])}
             onDeleteMember={deleteTeamMember}
             events={auditEvents}
+            pendingAuditEventIds={pendingAuditEventIds}
+            retryingAuditEventId={retryingAuditEventId}
+            onRetryAuditEvent={retryAuditEvent}
             importLogs={importLogs}
             onRevertImport={revertImport}
             authUser={authUser}
@@ -2796,6 +2803,15 @@ function InlineEntryTable({
     const updatedRow = updateAssessmentRowFromTableEdit(sourceRow, selected, fieldName, event.newValue, assessmentContext);
     if (updatedRow === sourceRow) return;
 
+    // AG Grid commits the current editor before it resolves Tab navigation. Commit
+    // React's immutable row update in that same phase so a later render cannot
+    // replace the row while the next editor is accepting the user's first digit.
+    flushSync(() => {
+      setRows((current) =>
+        current.map((row) => (row.id === sourceRow.id ? updatedRow : row))
+      );
+    });
+
     recordAudit(
       "Edited score",
       "Assessment result",
@@ -2803,9 +2819,6 @@ function InlineEntryTable({
       `Changed ${fieldName} from ${event.oldValue ?? "-"} to ${event.newValue ?? "-"}.`
     );
     markUnsaved("Assessment table changed. Save to keep the table changes.");
-    setRows((current) =>
-      current.map((row) => (row.id === sourceRow.id ? updatedRow : row))
-    );
   }
 
   return (
@@ -3825,6 +3838,9 @@ function ProfilePage({
   assignmentHomerooms,
   onDeleteMember,
   events,
+  pendingAuditEventIds,
+  retryingAuditEventId,
+  onRetryAuditEvent,
   importLogs,
   onRevertImport,
   authUser,
@@ -3848,6 +3864,9 @@ function ProfilePage({
   assignmentHomerooms: Record<string, string[]>;
   onDeleteMember: (memberId: string) => Promise<void>;
   events: AppAuditEvent[];
+  pendingAuditEventIds: Set<string>;
+  retryingAuditEventId: string | null;
+  onRetryAuditEvent: (eventId: string) => Promise<void>;
   importLogs: ImportChangeLog[];
   onRevertImport: (importLogId: string) => Promise<ImportRevertOutcome>;
   authUser: User | null;
@@ -4054,7 +4073,16 @@ function ProfilePage({
         </div>
       ) : null}
 
-      {visibleTab === "audit" ? <AuditLog events={events} importLogs={importLogs} onRevertImport={onRevertImport} /> : null}
+      {visibleTab === "audit" ? (
+        <AuditLog
+          events={events}
+          importLogs={importLogs}
+          pendingAuditEventIds={pendingAuditEventIds}
+          retryingAuditEventId={retryingAuditEventId}
+          onRetryAuditEvent={onRetryAuditEvent}
+          onRevertImport={onRevertImport}
+        />
+      ) : null}
 
       {visibleTab === "team" ? (
         <div className="panel team-panel">
@@ -5739,10 +5767,16 @@ function ReportFiles({
 function AuditLog({
   events,
   importLogs,
+  pendingAuditEventIds,
+  retryingAuditEventId,
+  onRetryAuditEvent,
   onRevertImport
 }: {
   events: AppAuditEvent[];
   importLogs: ImportChangeLog[];
+  pendingAuditEventIds: Set<string>;
+  retryingAuditEventId: string | null;
+  onRetryAuditEvent: (eventId: string) => Promise<void>;
   onRevertImport: (importLogId: string) => Promise<ImportRevertOutcome>;
 }) {
   const [filter, setFilter] = useState("");
@@ -5854,15 +5888,25 @@ function AuditLog({
           {sortedEvents.map((event) => {
             const importLog = event.importLogId ? importLogs.find((log) => log.id === event.importLogId) : null;
             const canRevert = Boolean(importLog && !importLog.revertedAt && event.eventType === "Imported spreadsheet");
+            const auditPending = pendingAuditEventIds.has(event.id);
             return (
-              <div className="audit-table-row" role="row" key={event.id}>
+              <div className={auditPending ? "audit-table-row audit-pending-row" : "audit-table-row"} role="row" key={event.id}>
                 <span className="audit-type">{event.eventType}</span>
                 <span>{event.entityLabel}</span>
                 <span>{event.revertedAt ? `${event.description} Reverted.` : event.description}</span>
                 <span>{event.actor}</span>
                 <time dateTime={event.createdAt}>{new Date(event.createdAt).toLocaleString()}</time>
                 <span>
-                  {canRevert && importLog ? (
+                  {auditPending ? (
+                    <button
+                      className="small-action audit-retry-action"
+                      disabled={Boolean(retryingAuditEventId)}
+                      onClick={() => void onRetryAuditEvent(event.id)}
+                      type="button"
+                    >
+                      {retryingAuditEventId === event.id ? "Retrying..." : "Retry audit"}
+                    </button>
+                  ) : canRevert && importLog ? (
                     <button
                       className="small-action audit-revert-action"
                       disabled={Boolean(revertingImportId)}

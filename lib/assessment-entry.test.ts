@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assessmentTemplates, type AssessmentTemplate } from "./assessment-templates";
+import { ORF_PERCENTILE_CALCULATION_KEYS } from "./orf-calculations";
 import {
   assessmentValueKey,
   buildEntryRows,
@@ -37,7 +38,9 @@ function customOrfTemplate() {
     fields: template.fields.map((field) => {
       if (field.id === "cwpm") return { ...field, id: "orf_cwpm_5", calculationKey: "orf_cwpm" };
       if (field.id === "median") return { ...field, id: "orf_med_4", name: "MED", calculationKey: "median" };
-      if (field.id === "percentile") return { ...field, id: "orf_ile_5", name: "%ile", calculationKey: "orf_percentile" };
+      if (field.calculationKey === ORF_PERCENTILE_CALCULATION_KEYS.fall) {
+        return { ...field, id: "orf_ile_5", name: "%ile" };
+      }
       return field;
     })
   };
@@ -118,6 +121,30 @@ describe("assessment entry rows", () => {
     expect(entry[assessmentValueKey(orf, fall, cwpm, sections[0])]).toBe(42);
     expect(entry[assessmentValueKey(orf, fall, median)]).toBe(24);
     expect(entry[assessmentValueKey(orf, fall, percentile)]).toBeNull();
+  });
+
+  it("applies the matching seasonal ORF percentile key below MED 50", () => {
+    const orf = assessmentTemplates.find((assessment) => assessment.id === "orf") as AssessmentTemplate;
+    const context = { schoolYear: "2026-2027", grade: "3" };
+    const wpm = orf.fields.find((field) => field.id === "wpm")!;
+    const epm = orf.fields.find((field) => field.id === "epm")!;
+    let row = emptyRow();
+
+    for (const round of orf.rounds) {
+      const sections = sectionsForAssessmentRound(orf, round);
+      for (const section of sections) {
+        row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, round, wpm, section), 49, context);
+        row = updateAssessmentRowFromTableEdit(row, orf, assessmentValueKey(orf, round, epm, section), 0, context);
+      }
+    }
+
+    const entry = buildEntryRows([row], orf, context)[0];
+    const expectedPercentiles = { fall: 14, winter: 7, spring: 5 } as const;
+    for (const round of orf.rounds) {
+      const percentile = orf.fields.find((field) => field.roundIds?.includes(round.id) && field.name === "%ile")!;
+      expect(entry[assessmentValueKey(orf, round, percentile)])
+        .toBe(expectedPercentiles[round.id as keyof typeof expectedPercentiles]);
+    }
   });
 
   it("does not let a legacy stored CWPM override the calculated WPM minus EPM value", () => {

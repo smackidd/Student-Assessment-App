@@ -1,6 +1,8 @@
 {
   "projects": {
-    "default": "student-assessment-2d869"
+    "default": "student-assessment-2d869",
+    "production": "student-assessment-2d869",
+    "test": "student-assessment-test"
   },
   "targets": {},
   "etags": {

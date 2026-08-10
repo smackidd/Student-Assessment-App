@@ -2,7 +2,9 @@
 
 ## Status and decision gate
 
-The application is prepared for invite-only Firebase Authentication, but MFA is not being enabled automatically by this change.
+Decision recorded August 10, 2026: keep the current no-email-verification beta policy and defer Firebase MFA until after beta. APP-095 is post-beta work; do not enable TOTP or change authentication billing/configuration during beta.
+
+After beta, reopen this decision gate before implementation. The current recommended direction is verified email for invited users, authenticator-app TOTP mandatory for Admins, optional staff enrollment during rollout, and two separately controlled Admin recovery accounts.
 
 Firebase's supported TOTP workflow requires all of the following:
 
@@ -11,10 +13,10 @@ Firebase's supported TOTP workflow requires all of the following:
 - A verified primary email address before a user can enroll a second factor.
 - Enrollment, sign-in challenge, unenrollment, and recovery UI in the application.
 
-The current beta policy intentionally does not require email verification. That conflicts with Firebase's MFA prerequisite, so the product owner must choose one of these policies before implementation is enabled:
+The current beta policy intentionally does not require email verification. That conflicts with Firebase's MFA prerequisite. The product owner selected option 2 for beta:
 
 1. Require verified email and offer TOTP to every account, with TOTP mandatory for Admins.
-2. Keep the no-verification beta policy and defer Firebase MFA until after beta.
+2. **Selected for beta:** Keep the no-verification beta policy and defer Firebase MFA until after beta.
 3. Move staff sign-in to verified Google Workspace accounts, then require TOTP or Workspace MFA for privileged access.
 
 Do not silently switch on MFA. Enabling Identity Platform or changing its configuration can affect billing and sign-in behavior.

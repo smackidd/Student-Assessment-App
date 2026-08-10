@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "deploy:test": "powershell -ExecutionPolicy Bypass -File scripts/deploy-test-vercel.ps1",
     "start": "next start",
     "test": "vitest run",
     "test:e2e": "playwright test",

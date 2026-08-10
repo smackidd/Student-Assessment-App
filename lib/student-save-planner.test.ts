@@ -91,4 +91,16 @@ describe("student SQL save planning", () => {
   it("rejects an invalid batch size", async () => {
     await expect(runInBatches([1], 0, async (item) => item)).rejects.toThrow("positive whole number");
   });
+
+  it("plans a 500-student roster without duplicate writes", () => {
+    const rows = Array.from({ length: 500 }, (_, index) => ({
+      id: `student-${index + 1}`,
+      student: `Student ${index + 1}`
+    }));
+    const plan = buildStudentSavePlan([...rows, rows[0]], []);
+
+    expect(plan.actions).toHaveLength(500);
+    expect(plan.skippedCount).toBe(1);
+    expect(new Set(plan.actions.map((action) => action.studentNumber)).size).toBe(500);
+  });
 });

@@ -21,7 +21,7 @@ Those 25 findings resolve to 17 distinct application work items. Repeated findin
 | APP-090 | `entry-types` | Prevent focus flicker and dropped digits during fast keyboard entry. |
 | APP-091 | `entry-invalid-numeric`, `calc-cwpm` | Enforce field validation, Score/Total rules, and calculated-field locking. |
 | APP-092 | `entry-persistence` | Restore the last authorized tab per signed-in user. |
-| APP-093 | `calc-orf-percentile-map` | Add approved window-specific ORF norms only after the school selects a valid source. |
+| APP-093 | `calc-orf-percentile-map` | Implemented provisional FastBridge 2019 fall/winter/spring testing keys for grades 3-8 while retaining the raw `ORF_MED >= 50` blank rule; school policy confirmation remains a production gate. |
 | APP-094 | `reliability-large-import`, `reliability-save-time` | Improve and profile SQL synchronization for larger rosters. |
 
 Two requested operational cards were added separately because they were not duplicates of Steve's checklist findings:

@@ -1,10 +1,30 @@
 import { randomBytes } from "node:crypto";
 import { getApps, initializeApp } from "firebase-admin/app";
 import { getAuth, type DecodedIdToken, type UserRecord } from "firebase-admin/auth";
-import { FieldValue, getFirestore } from "firebase-admin/firestore";
+import { getDataConnect } from "firebase-admin/data-connect";
+import { FieldValue, getFirestore, Timestamp } from "firebase-admin/firestore";
 import { defineString } from "firebase-functions/params";
 import { beforeUserCreated, beforeUserSignedIn, HttpsError as IdentityHttpsError } from "firebase-functions/v2/identity";
 import { HttpsError, onCall, type CallableRequest } from "firebase-functions/v2/https";
+import {
+  ImportRollbackError,
+  planImportRollback,
+  type ImportRollbackPlan
+} from "./import-rollback.js";
+import {
+  mergeWorkspaceForAccess,
+  parseWorkspaceState,
+  scopeWorkspaceForAccess,
+  WorkspaceScopeError,
+  type WorkspaceAccess,
+  type WorkspaceState
+} from "./workspace-scope.js";
+import {
+  buildStudentSyncPlan,
+  parseStudentSyncInput,
+  studentSyncBatches,
+  type SavedStudent
+} from "./student-sync.js";
 
 if (!getApps().length) initializeApp();
 
@@ -16,6 +36,13 @@ const organizationName = defineString("ORGANIZATION_NAME", { default: "Student E
 const applicationUrl = defineString("APPLICATION_URL", {
   default: "https://student-assessment-app.vercel.app"
 });
+const workspaceDataConnect = getDataConnect({
+  location: region,
+  serviceId: "student-assessment",
+  connector: "student-assessment"
+});
+const workspaceId = "main";
+const workspaceLockDurationMs = 60_000;
 
 type OrganizationRole = (typeof validRoles)[number];
 
@@ -43,6 +70,50 @@ type RecordAuditEventRequest = {
   entityLabel?: unknown;
   description?: unknown;
   importLogId?: unknown;
+};
+
+type SaveWorkspaceRequest = {
+  state?: unknown;
+  version?: unknown;
+};
+
+type RevertImportRequest = {
+  importLogId?: unknown;
+};
+
+type SyncStudentsRequest = {
+  students?: unknown;
+};
+
+type WorkspaceQueryResult = {
+  prototypeWorkspaceState?: {
+    id: string;
+    stateJson: unknown;
+    updatedAt: string;
+  } | null;
+};
+
+type WorkspaceMutationResult = {
+  prototypeWorkspaceState_upsert: {
+    id: string;
+    stateJson: unknown;
+    updatedAt: string;
+  };
+};
+
+type RollbackWorkspaceMutationResult = {
+  prototypeWorkspaceState_update: {
+    id: string;
+    stateJson: WorkspaceState;
+    updatedAt: string;
+  };
+  auditEvent_insert: {
+    id: string;
+  };
+};
+
+type ListStudentsResult = {
+  students: SavedStudent[];
 };
 
 export const blockPublicSignUp = beforeUserCreated({ region }, () => {
@@ -254,6 +325,104 @@ export const recordAuditEvent = onCall(
   }
 );
 
+export const loadAuthorizedWorkspaceState = onCall({ region }, async (request) => {
+  const access = await workspaceAccessFor(request);
+  const workspace = await loadWorkspaceRecord();
+  if (!workspace) return { state: null, version: null };
+  const state = authorizedWorkspaceState(workspace.stateJson);
+  return {
+    state: authorizedWorkspaceForAccess(state, access),
+    version: workspace.updatedAt
+  };
+});
+
+export const saveAuthorizedWorkspaceState = onCall(
+  { region },
+  async (request: CallableRequest<SaveWorkspaceRequest>) => {
+    const access = await workspaceAccessFor(request);
+    const proposed = authorizedWorkspaceState(request.data.state);
+    const expectedVersion = workspaceVersion(request.data.version);
+    return withWorkspaceLock(access.uid, async () => {
+      const currentRecord = await loadWorkspaceRecord();
+      const currentVersion = currentRecord?.updatedAt ?? null;
+      if (currentVersion !== expectedVersion) {
+        throw new HttpsError(
+          "aborted",
+          "The workspace changed after it was loaded. Reload before saving so another user's work is not overwritten."
+        );
+      }
+      const current = currentRecord ? authorizedWorkspaceState(currentRecord.stateJson) : null;
+      const merged = mergeWorkspaceForAccess(current, proposed, access);
+      const saved = await saveWorkspaceRecord(merged);
+      return {
+        version: saved.updatedAt,
+        state: authorizedWorkspaceForAccess(merged, access)
+      };
+    });
+  }
+);
+
+export const syncOrganizationStudents = onCall(
+  { region, timeoutSeconds: 120, memory: "512MiB" },
+  async (request: CallableRequest<SyncStudentsRequest>) => {
+    requireAdmin(request);
+    let students;
+    try {
+      students = parseStudentSyncInput(request.data.students);
+    } catch (error) {
+      throw new HttpsError("invalid-argument", error instanceof Error ? error.message : "The student list is invalid.");
+    }
+
+    const startedAt = Date.now();
+    const existing = await workspaceDataConnect.executeQuery<ListStudentsResult, Record<string, never>>(
+      "ListStudents",
+      {}
+    );
+    const plan = buildStudentSyncPlan(students, existing.data.students);
+    const batches = studentSyncBatches(plan.rows, 200);
+
+    for (const batch of batches) {
+      await workspaceDataConnect.upsertMany("student", batch);
+    }
+
+    return {
+      createdCount: plan.createdCount,
+      updatedCount: plan.updatedCount,
+      skippedCount: plan.skippedCount,
+      batchCount: batches.length,
+      durationMs: Date.now() - startedAt
+    };
+  }
+);
+
+export const revertSpreadsheetImport = onCall(
+  { region },
+  async (request: CallableRequest<RevertImportRequest>) => {
+    const admin = requireAdmin(request);
+    const importLogId = requiredAuditEventId(request.data.importLogId);
+    return withWorkspaceLock(admin.uid, async () => {
+      const currentRecord = await loadWorkspaceRecord();
+      if (!currentRecord) {
+        throw new HttpsError("failed-precondition", "The shared workspace has not been initialized.");
+      }
+      const plan = planImportRollback(currentRecord.stateJson, importLogId, new Date().toISOString());
+      const saved = await executeImportRollbackMutation(plan, admin.uid);
+      const mirroredAuditEvent = await mirrorRollbackAuditEvent(plan, admin.uid).catch((error) => {
+        console.error("Rollback audit mirror failed", error);
+        return null;
+      });
+      return {
+        state: saved.stateJson,
+        version: saved.updatedAt,
+        importLogId,
+        deletedStudentCount: plan.studentNumbers.length,
+        auditSaved: Boolean(mirroredAuditEvent),
+        ...(mirroredAuditEvent ? { event: mirroredAuditEvent } : {})
+      };
+    });
+  }
+);
+
 export const deleteOrganizationUser = onCall(
   { region },
   async (request: CallableRequest<DeleteUserRequest>) => {
@@ -308,7 +477,7 @@ function requireSignedIn(request: CallableRequest<unknown>) {
 function requireAdmin(request: CallableRequest<unknown>) {
   const token = requireSignedIn(request);
   if (token.organizationId !== organizationId || token.role !== "admin") {
-    throw new HttpsError("permission-denied", "Only an Admin can manage organization users.");
+    throw new HttpsError("permission-denied", "Only an Admin can perform this action.");
   }
   return token;
 }
@@ -319,6 +488,183 @@ function requireOrganizationMember(request: CallableRequest<unknown>) {
     throw new HttpsError("permission-denied", "Active organization access is required.");
   }
   return token;
+}
+
+async function workspaceAccessFor(request: CallableRequest<unknown>): Promise<WorkspaceAccess> {
+  const token = requireOrganizationMember(request);
+  const role = claimRole(token);
+  if (!role) throw new HttpsError("permission-denied", "Active organization access is required.");
+  const user = await getAuth().getUser(token.uid);
+  return {
+    uid: token.uid,
+    role,
+    displayName: user.displayName?.trim() || user.email?.split("@")[0] || "Team member",
+    email: user.email ?? normalizeEmail(token.email),
+    grade: claimText(token.grade),
+    homeroom: claimText(token.homeroom)
+  };
+}
+
+async function loadWorkspaceRecord() {
+  const result = await workspaceDataConnect.executeQuery<WorkspaceQueryResult, { id: string }>(
+    "GetPrototypeWorkspaceState",
+    { id: workspaceId }
+  );
+  return result.data.prototypeWorkspaceState ?? null;
+}
+
+async function saveWorkspaceRecord(state: WorkspaceState) {
+  await workspaceDataConnect.executeMutation<
+    WorkspaceMutationResult,
+    { id: string; stateJson: WorkspaceState }
+  >("SavePrototypeWorkspaceState", { id: workspaceId, stateJson: state });
+  // SQL Connect write fields return their key by default. Read the row back
+  // while the Firestore workspace lock is still held so callers receive the
+  // authoritative server timestamp used for optimistic concurrency.
+  const saved = await loadWorkspaceRecord();
+  if (!saved) throw new Error("The workspace save completed without a readable workspace record.");
+  return saved;
+}
+
+async function executeImportRollbackMutation(plan: ImportRollbackPlan, actorUid: string) {
+  const variables = {
+    workspaceId,
+    stateJson: plan.state,
+    eventType: "Reverted import",
+    entityType: "Overview import",
+    entityId: plan.importLog.id,
+    entityLabel: `${plan.importLog.schoolYear} / Grade ${plan.importLog.grade}`,
+    beforeJson: {
+      fileName: plan.importLog.fileName,
+      importedAt: plan.importLog.createdAt,
+      studentNumbers: plan.studentNumbers
+    },
+    afterJson: {
+      revertedAt: plan.revertedAt,
+      actorUid,
+      deletedStudentCount: plan.studentNumbers.length
+    }
+  };
+
+  try {
+    if (plan.studentNumbers.length) {
+      await workspaceDataConnect.executeMutation<
+        RollbackWorkspaceMutationResult,
+        typeof variables & { studentNumbers: string[] }
+      >("RollbackImportWithStudentDelete", { ...variables, studentNumbers: plan.studentNumbers });
+    } else {
+      await workspaceDataConnect.executeMutation<RollbackWorkspaceMutationResult, typeof variables>(
+        "RollbackImportWorkspaceOnly",
+        variables
+      );
+    }
+    const saved = await loadWorkspaceRecord();
+    if (!saved) throw new Error("The import rollback completed without a readable workspace record.");
+    return saved;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "");
+    if (message.includes("ROLLBACK_STUDENT_UNSAFE")) {
+      throw new HttpsError(
+        "failed-precondition",
+        "This import cannot be reverted because every import-created SQL student could not be verified as dependency-free. A student may be missing or have a later enrollment, assessment result, note, file, or report. No data was changed."
+      );
+    }
+    throw error;
+  }
+}
+
+async function mirrorRollbackAuditEvent(plan: ImportRollbackPlan, actorUid: string) {
+  const actorUser = await getAuth().getUser(actorUid);
+  const actorEmail = actorUser.email ?? "";
+  const actor = actorUser.displayName?.trim() || actorEmail.split("@")[0] || actorUid;
+  const auditEvent = getFirestore()
+    .collection("organizations")
+    .doc(organizationId)
+    .collection("auditEvents")
+    .doc(`audit-revert-${plan.importLog.id}`);
+
+  await getFirestore().runTransaction(async (transaction) => {
+    const existing = await transaction.get(auditEvent);
+    if (existing.exists) return;
+    transaction.set(auditEvent, {
+      eventType: "Reverted import",
+      entityType: "Overview import",
+      entityLabel: `${plan.importLog.schoolYear} / Grade ${plan.importLog.grade}`,
+      description: `Reverted imported students and assessment values from ${plan.importLog.fileName}.`,
+      actor,
+      actorUid,
+      actorEmail,
+      importLogId: plan.importLog.id,
+      createdAt: FieldValue.serverTimestamp()
+    });
+  });
+
+  const savedEvent = await auditEvent.get();
+  return auditEventForClient(savedEvent.id, savedEvent.data());
+}
+
+async function withWorkspaceLock<T>(uid: string, operation: () => Promise<T>) {
+  const lock = getFirestore()
+    .collection("organizations")
+    .doc(organizationId)
+    .collection("workspaceLocks")
+    .doc(workspaceId);
+  const owner = `${uid}:${randomBytes(16).toString("hex")}`;
+  const now = Timestamp.now();
+  await getFirestore().runTransaction(async (transaction) => {
+    const existing = await transaction.get(lock);
+    const expiresAt = existing.get("expiresAt");
+    if (existing.exists && expiresAt instanceof Timestamp && expiresAt.toMillis() > now.toMillis()) {
+      throw new HttpsError("aborted", "Another workspace save is in progress. Wait a moment and try again.");
+    }
+    transaction.set(lock, {
+      owner,
+      uid,
+      acquiredAt: now,
+      expiresAt: Timestamp.fromMillis(now.toMillis() + workspaceLockDurationMs)
+    });
+  });
+
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof HttpsError) throw error;
+    if (error instanceof WorkspaceScopeError) throw new HttpsError(error.code, error.message);
+    if (error instanceof ImportRollbackError) throw new HttpsError(error.code, error.message);
+    console.error("Authorized workspace operation failed", error);
+    throw new HttpsError("internal", "The authorized workspace operation could not be completed.");
+  } finally {
+    await getFirestore().runTransaction(async (transaction) => {
+      const existing = await transaction.get(lock);
+      if (existing.exists && existing.get("owner") === owner) transaction.delete(lock);
+    }).catch((error) => console.error("Workspace lock cleanup failed", error));
+  }
+}
+
+function workspaceVersion(value: unknown) {
+  if (value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new HttpsError("invalid-argument", "Load the workspace before saving changes.");
+  }
+  return value;
+}
+
+function authorizedWorkspaceState(value: unknown) {
+  try {
+    return parseWorkspaceState(value);
+  } catch (error) {
+    if (error instanceof WorkspaceScopeError) throw new HttpsError(error.code, error.message);
+    throw error;
+  }
+}
+
+function authorizedWorkspaceForAccess(state: WorkspaceState, access: WorkspaceAccess) {
+  try {
+    return scopeWorkspaceForAccess(state, access);
+  } catch (error) {
+    if (error instanceof WorkspaceScopeError) throw new HttpsError(error.code, error.message);
+    throw error;
+  }
 }
 
 function claimRole(token: DecodedIdToken) {
