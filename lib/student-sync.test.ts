@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildStudentSyncPlan,
   parseStudentSyncInput,
+  studentSyncInputBatches,
   studentSyncBatches,
   type SavedStudent
 } from "../functions/src/student-sync";
@@ -41,10 +42,34 @@ describe("server student synchronization", () => {
     }));
     const parsed = parseStudentSyncInput([...rows, rows[0]]);
     const plan = buildStudentSyncPlan(parsed, [], () => crypto.randomUUID());
+    const lookupBatches = studentSyncInputBatches(parsed, 200);
     const batches = studentSyncBatches(plan.rows, 200);
 
     expect(parsed).toHaveLength(500);
+    expect(lookupBatches.map((batch) => batch.length)).toEqual([200, 200, 100]);
     expect(batches.map((batch) => batch.length)).toEqual([200, 200, 100]);
     expect(new Set(plan.rows.map((row) => row.id)).size).toBe(500);
+  });
+
+  it("uses one stable SQL identity when a student appears in multiple years", () => {
+    const repeatedAcrossYears = parseStudentSyncInput([
+      { id: "student-a", student: "Alex Smith" },
+      { id: "student-a", student: "Alex Smith" }
+    ]);
+    const plan = buildStudentSyncPlan(repeatedAcrossYears, []);
+
+    expect(repeatedAcrossYears).toHaveLength(1);
+    expect(plan.rows).toHaveLength(1);
+    expect(plan.rows[0].studentNumber).toBe("student-a");
+  });
+
+  it("does not merge different students merely because their names match", () => {
+    const plan = buildStudentSyncPlan([
+      { id: "student-a", student: "Sam Lee" },
+      { id: "student-b", student: "Sam Lee" }
+    ], []);
+
+    expect(plan.rows).toHaveLength(2);
+    expect(new Set(plan.rows.map((row) => row.id)).size).toBe(2);
   });
 });

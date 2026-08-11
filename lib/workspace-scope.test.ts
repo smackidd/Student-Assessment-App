@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   mergeWorkspaceForAccess,
+  parseWorkspaceState,
   scopeWorkspaceForAccess,
   WorkspaceScopeError,
   type WorkspaceAccess,
@@ -107,6 +108,22 @@ function workspace(): WorkspaceState {
 }
 
 describe("workspace evaluator scope", () => {
+  it("allows one student across multiple years but rejects two placements in one year", () => {
+    expect(parseWorkspaceState(workspace()).placements.filter((placement) => placement.studentId === "student-a"))
+      .toHaveLength(2);
+
+    const duplicate = workspace();
+    duplicate.placements.push({
+      studentId: "student-a",
+      schoolYear: "2026-2027",
+      grade: "4",
+      homeroom: "4A"
+    });
+    expect(() => parseWorkspaceState(duplicate)).toThrow(
+      "A student cannot appear more than once in the same school year."
+    );
+  });
+
   it("returns only the current assigned classroom and evaluator-visible values", () => {
     const scoped = scopeWorkspaceForAccess(workspace(), teacher);
 

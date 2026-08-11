@@ -99,7 +99,22 @@ export function parseWorkspaceState(value: unknown): WorkspaceState {
   if (!rows.every(isWorkspaceRow) || !placements.every(isWorkspacePlacement) || !templates.every(isWorkspaceTemplate)) {
     throw new WorkspaceScopeError("invalid-argument", "The workspace payload contains invalid records.");
   }
+  assertUniqueStudentYears(placements);
   return value as WorkspaceState;
+}
+
+function assertUniqueStudentYears(placements: WorkspacePlacement[]) {
+  const seen = new Set<string>();
+  for (const placement of placements) {
+    const key = [placement.studentId, placement.schoolYear].join("\u001f");
+    if (seen.has(key)) {
+      throw new WorkspaceScopeError(
+        "invalid-argument",
+        "A student cannot appear more than once in the same school year."
+      );
+    }
+    seen.add(key);
+  }
 }
 
 export function scopeWorkspaceForAccess(state: WorkspaceState, access: WorkspaceAccess): WorkspaceState {

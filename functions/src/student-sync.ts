@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type StudentSyncInput = {
   id: string;
   student: string;
@@ -46,7 +48,7 @@ export function parseStudentSyncInput(value: unknown, maximumRows = 1_000): Stud
 export function buildStudentSyncPlan(
   rows: StudentSyncInput[],
   existingStudents: SavedStudent[],
-  createId: () => string = randomUUID
+  createId: (studentNumber: string) => string = stableStudentDatabaseId
 ): StudentSyncPlan {
   const savedByNumber = new Map(
     existingStudents.map((student) => [student.studentNumber || student.id, student])
@@ -65,7 +67,7 @@ export function buildStudentSyncPlan(
     }
 
     upserts.push({
-      id: saved?.id ?? createId(),
+      id: saved?.id ?? createId(row.id),
       ...name,
       studentNumber: row.id,
       active: true
@@ -75,6 +77,15 @@ export function buildStudentSyncPlan(
   }
 
   return { rows: upserts, createdCount, updatedCount, skippedCount };
+}
+
+export function studentSyncInputBatches(rows: StudentSyncInput[], batchSize: number) {
+  if (!Number.isSafeInteger(batchSize) || batchSize < 1) throw new Error("Student synchronization batch size is invalid.");
+  const batches: StudentSyncInput[][] = [];
+  for (let index = 0; index < rows.length; index += batchSize) {
+    batches.push(rows.slice(index, index + batchSize));
+  }
+  return batches;
 }
 
 export function studentSyncBatches(rows: StudentUpsertRow[], batchSize: number) {
@@ -118,4 +129,14 @@ function requiredText(value: unknown, maximumLength: number, label: string) {
 function normalize(value: string) {
   return value.trim().replace(/\s+/g, " ").toLocaleLowerCase();
 }
-import { randomUUID } from "node:crypto";
+
+function stableStudentDatabaseId(studentNumber: string) {
+  const bytes = createHash("sha256")
+    .update(`student-assessment:${studentNumber}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}

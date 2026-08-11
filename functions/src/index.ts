@@ -22,6 +22,7 @@ import {
 import {
   buildStudentSyncPlan,
   parseStudentSyncInput,
+  studentSyncInputBatches,
   studentSyncBatches,
   type SavedStudent
 } from "./student-sync.js";
@@ -115,6 +116,19 @@ type RollbackWorkspaceMutationResult = {
 type ListStudentsResult = {
   students: SavedStudent[];
 };
+
+const studentsByNumberQuery = `
+  query StudentsByNumber($studentNumbers: [String!]!) {
+    students(where: { studentNumber: { in: $studentNumbers } }, limit: 200) {
+      id
+      firstName
+      lastName
+      preferredName
+      studentNumber
+      active
+    }
+  }
+`;
 
 export const blockPublicSignUp = beforeUserCreated({ region }, () => {
   throw new IdentityHttpsError(
@@ -374,12 +388,28 @@ export const syncOrganizationStudents = onCall(
     }
 
     const startedAt = Date.now();
-    const existing = await workspaceDataConnect.executeQuery<ListStudentsResult, Record<string, never>>(
-      "ListStudents",
-      {}
+    const lookupBatches = studentSyncInputBatches(students, 200);
+    const lookupResults = await Promise.all(
+      lookupBatches.map((batch) => workspaceDataConnect.executeGraphqlRead<
+        ListStudentsResult,
+        { studentNumbers: string[] }
+      >(studentsByNumberQuery, {
+        variables: { studentNumbers: batch.map((student) => student.id) }
+      }))
     );
-    const plan = buildStudentSyncPlan(students, existing.data.students);
+    const existingStudents = lookupResults.flatMap((result) => result.data.students);
+    const plan = buildStudentSyncPlan(students, existingStudents);
     const batches = studentSyncBatches(plan.rows, 200);
+
+    console.info("Student synchronization plan", {
+      requestedCount: students.length,
+      matchedCount: existingStudents.length,
+      createdCount: plan.createdCount,
+      updatedCount: plan.updatedCount,
+      skippedCount: plan.skippedCount,
+      lookupBatchCount: lookupBatches.length,
+      writeBatchCount: batches.length
+    });
 
     for (const batch of batches) {
       await workspaceDataConnect.upsertMany("student", batch);
