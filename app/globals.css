@@ -1273,7 +1273,8 @@ textarea {
 }
 
 .danger-outline-action {
-  border-color: rgba(185, 54, 42, 0.4);
+  border-color: #b9362a;
+  background: #fff0ed;
   color: #8d2118;
 }
 
