@@ -225,6 +225,7 @@ export default function StudentEvaluationApp() {
   const [importLogs, setImportLogs] = useState<ImportChangeLog[]>([]);
   const revertingImportIdsRef = useRef(new Set<string>());
   const handledAccessChangeRef = useRef<string | null>(null);
+  const pendingStudentSyncAttemptRef = useRef<SavedWorkspaceState | null>(null);
   const [auditEvents, setAuditEvents] = useState<AppAuditEvent[]>([
     {
       id: "audit-seed-1",
@@ -370,6 +371,7 @@ export default function StudentEvaluationApp() {
           setWorkspaceReadyForUid(null);
           setNavigationReadyForUid(null);
           setPendingAuditEventIds(new Set());
+          pendingStudentSyncAttemptRef.current = null;
         }
 
         if (!user) {
@@ -540,21 +542,7 @@ export default function StudentEvaluationApp() {
         if (cancelled) return;
         if (savedState) {
           const normalizedTemplates = normalizeAssessmentTemplates(savedState.templates);
-          let normalizedSavedState = { ...savedState, templates: normalizedTemplates };
-          let recoveredPendingStudentSync = false;
-          let pendingStudentSyncError: Error | null = null;
-          if (savedState.pendingStudentSync && isAdmin) {
-            try {
-              await saveStudentsToDatabase(savedState.rows);
-              if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
-              const reconciledWorkspaceState = { ...normalizedSavedState, pendingStudentSync: false };
-              await savePrototypeWorkspaceState(reconciledWorkspaceState);
-              normalizedSavedState = reconciledWorkspaceState;
-              recoveredPendingStudentSync = true;
-            } catch (error) {
-              pendingStudentSyncError = error instanceof Error ? error : new Error("The pending SQL synchronization failed.");
-            }
-          }
+          const normalizedSavedState = { ...savedState, templates: normalizedTemplates };
           if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
           setOrfRows(savedState.rows);
           setOverviewPlacements(savedState.placements);
@@ -568,12 +556,8 @@ export default function StudentEvaluationApp() {
             setAuditEvents((current) => mergeAuditEvents(savedState.auditEvents, current));
           }
           setImportLogs(savedState.importLogs ?? []);
-          setSaveStatus(pendingStudentSyncError ? "error" : "saved");
-          setSaveMessage(pendingStudentSyncError
-            ? `Loaded the workspace, but its pending SQL synchronization still needs attention. ${pendingStudentSyncError.message}`
-            : recoveredPendingStudentSync
-              ? "Loaded the workspace and completed its pending SQL synchronization."
-              : "Loaded the saved table workspace from Firebase.");
+          setSaveStatus("saved");
+          setSaveMessage("Loaded the saved table workspace from Firebase.");
           return;
         }
 
@@ -609,7 +593,50 @@ export default function StudentEvaluationApp() {
     return () => {
       cancelled = true;
     };
-  }, [authReady, authUser, isAdmin, organizationAccess, workspaceReadyForUid]);
+  }, [authReady, authUser, organizationAccess, workspaceReadyForUid]);
+
+  useEffect(() => {
+    if (
+      !authUser
+      || organizationAccess !== "active"
+      || !isAdmin
+      || workspaceReadyForUid !== authUser.uid
+      || !lastSavedWorkspaceState?.pendingStudentSync
+      || pendingStudentSyncAttemptRef.current === lastSavedWorkspaceState
+    ) return;
+
+    let cancelled = false;
+    const authenticatedUid = authUser.uid;
+    const pendingState = lastSavedWorkspaceState;
+    pendingStudentSyncAttemptRef.current = pendingState;
+    setSaveStatus("saving");
+    setSaveMessage("Completing pending SQL student synchronization...");
+
+    async function recoverPendingStudentSync() {
+      try {
+        await saveStudentsToDatabase(pendingState.rows);
+        if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
+        const reconciledWorkspaceState = await savePrototypeWorkspaceState({
+          ...pendingState,
+          pendingStudentSync: false
+        });
+        if (cancelled || getAuth(firebaseApp).currentUser?.uid !== authenticatedUid) return;
+        setLastSavedWorkspaceState(reconciledWorkspaceState);
+        setSaveStatus("saved");
+        setSaveMessage("Loaded the workspace and completed its pending SQL synchronization.");
+      } catch (error) {
+        if (cancelled) return;
+        const syncError = error instanceof Error ? error : new Error("The pending SQL synchronization failed.");
+        setSaveStatus("error");
+        setSaveMessage(`Loaded the workspace, but its pending SQL synchronization still needs attention. ${syncError.message}`);
+      }
+    }
+
+    void recoverPendingStudentSync();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser, isAdmin, lastSavedWorkspaceState, organizationAccess, workspaceReadyForUid]);
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
