@@ -1268,7 +1268,11 @@ textarea {
   white-space: nowrap;
 }
 
-.overview-toolbar .overview-options-action {
+.overview-toolbar-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: end;
+  gap: 8px;
   margin-left: auto;
 }
 
@@ -2344,8 +2348,7 @@ textarea {
   background: var(--panel-2);
 }
 
-.profile-readonly-field span,
-.entry-scope-note {
+.profile-readonly-field span {
   color: var(--muted);
   font-size: 0.8rem;
   font-weight: 900;
@@ -2469,7 +2472,7 @@ textarea {
   }
 }
 
-@media (max-width: 999px) {
+@media (max-width: 1279px) {
   .overview-toolbar {
     flex-wrap: wrap;
   }

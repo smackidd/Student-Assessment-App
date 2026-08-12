@@ -17,7 +17,7 @@ New-Item -ItemType Directory -Path $deploymentRoot | Out-Null
 
 try {
   & robocopy $appRoot $deploymentRoot /E /R:1 /W:1 `
-    /XD node_modules .git .vercel .next .next-verify out test-results playwright-report `
+    /XD node_modules .git .vercel .next .next-* out test-results playwright-report `
     /XF *.log .env .env.* firebase-debug.log | Out-Null
 
   if ($LASTEXITCODE -ge 8) {

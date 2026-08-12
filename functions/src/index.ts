@@ -253,40 +253,46 @@ export const updateOrganizationUserRole = onCall(
     const role = requiredRole(request.data.role);
     const grade = optionalAssignment(request.data.grade, "grade");
     const homeroom = optionalAssignment(request.data.homeroom, "homeroom");
-    if (role === "teacher_ea" && (!grade || !homeroom)) {
+    if (role === "teacher_ea" && !grade) {
       throw new HttpsError(
         "failed-precondition",
-        "Teacher / EA access requires both a grade and a home room assignment."
+        "Teacher / EA access requires a grade assignment."
       );
     }
     if (uid === admin.uid) {
       throw new HttpsError("failed-precondition", "Admins cannot change their own role.");
     }
 
-    const user = await getAuth().getUser(uid);
-    if (user.customClaims?.organizationId !== organizationId) {
-      throw new HttpsError("not-found", "That user is not part of this organization.");
-    }
+    try {
+      const user = await getAuth().getUser(uid);
+      if (user.customClaims?.organizationId !== organizationId) {
+        throw new HttpsError("not-found", "That user is not part of this organization.");
+      }
 
-    const { grade: _previousGrade, homeroom: _previousHomeroom, ...existingClaims } = user.customClaims ?? {};
-    await getAuth().setCustomUserClaims(uid, {
-      ...existingClaims,
-      organizationId,
-      role,
-      ...(role === "teacher_ea" ? { grade, homeroom } : {})
-    });
-    await getAuth().revokeRefreshTokens(uid);
-    await getFirestore()
-      .collection("organizations")
-      .doc(organizationId)
-      .collection("accessChanges")
-      .doc(uid)
-      .set({
-        uid,
-        changedBy: admin.uid,
-        changedAt: FieldValue.serverTimestamp()
+      const { grade: _previousGrade, homeroom: _previousHomeroom, ...existingClaims } = user.customClaims ?? {};
+      await getAuth().setCustomUserClaims(uid, {
+        ...existingClaims,
+        organizationId,
+        role,
+        ...(role === "teacher_ea" ? { grade, homeroom } : {})
       });
-    return { member: organizationMember(await getAuth().getUser(uid)) };
+      await getAuth().revokeRefreshTokens(uid);
+      await getFirestore()
+        .collection("organizations")
+        .doc(organizationId)
+        .collection("accessChanges")
+        .doc(uid)
+        .set({
+          uid,
+          changedBy: admin.uid,
+          changedAt: FieldValue.serverTimestamp()
+        });
+      return { member: organizationMember(await getAuth().getUser(uid)) };
+    } catch (error) {
+      if (error instanceof HttpsError) throw error;
+      console.error("Organization access update failed", { adminUid: admin.uid, uid, role, grade, homeroom, error });
+      throw new HttpsError("internal", "Team access could not be updated.");
+    }
   }
 );
 

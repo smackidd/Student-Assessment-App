@@ -8,6 +8,15 @@ const expectedProjectIds: Record<string, string> = {
   test: "student-assessment-test"
 };
 
+const isLocalHostname = (hostname: string) =>
+  hostname === "localhost" ||
+  hostname.endsWith(".local") ||
+  /^127\./.test(hostname) ||
+  /^10\./.test(hostname) ||
+  /^192\.168\./.test(hostname) ||
+  /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+  /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(hostname);
+
 if (
   appEnvironment &&
   expectedProjectIds[appEnvironment] &&
@@ -15,6 +24,16 @@ if (
 ) {
   throw new Error(
     `Firebase environment mismatch: ${appEnvironment} must use ${expectedProjectIds[appEnvironment]}.`
+  );
+}
+
+if (
+  typeof window !== "undefined" &&
+  isLocalHostname(window.location.hostname) &&
+  firebaseProjectId === expectedProjectIds.production
+) {
+  throw new Error(
+    "Local application sessions must use the student-assessment-test Firebase project."
   );
 }
 

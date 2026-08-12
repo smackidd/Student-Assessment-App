@@ -77,8 +77,11 @@ import {
   type StudentPlacement,
   type StudentSearchOption
 } from "@/lib/overview-state";
+import { latestSchoolYear, resolveTeamMemberAccess, teamAssignmentHomerooms } from "@/lib/team-assignments";
 import { firebaseApp } from "@/lib/firebase";
+import { prepareInvitationHandoff } from "@/lib/invitation-handoff";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
+import { studentRowsNeedingSqlSync } from "@/lib/student-sync";
 import {
   mergeAuditEvents,
   sortAuditEvents,
@@ -192,6 +195,7 @@ type OverviewDialog =
 export default function StudentEvaluationApp() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
+  const [invitationHandoffComplete, setInvitationHandoffComplete] = useState(false);
   const [templates, setTemplates] = useState<AssessmentTemplate[]>(assessmentTemplates);
   const [selectedId, setSelectedId] = useState(assessmentTemplates[0].id);
   const [activeView, setActiveView] = useState<AppView>("overview");
@@ -281,6 +285,11 @@ export default function StudentEvaluationApp() {
     [selectedId, templates]
   );
   const isAdmin = currentUserRole === "Admin";
+  const newestSchoolYear = useMemo(() => latestSchoolYear(schoolYears), [schoolYears]);
+  const assignmentHomerooms = useMemo(
+    () => teamAssignmentHomerooms(overviewPlacements, newestSchoolYear),
+    [newestSchoolYear, overviewPlacements]
+  );
   const activeNoteStudent = activeNoteStudentId
     ? orfRows.find((row) => row.id === activeNoteStudentId) ?? null
     : null;
@@ -291,7 +300,7 @@ export default function StudentEvaluationApp() {
           (placement) =>
             placement.schoolYear === selectedOverviewYear &&
             placement.grade === selectedOverviewGrade &&
-            (isAdmin || placement.homeroom === userProfile.homeroom)
+            (isAdmin || !userProfile.homeroom || placement.homeroom === userProfile.homeroom)
         )
         .map((placement) => {
           const row = orfRows.find((studentRow) => studentRow.id === placement.studentId);
@@ -312,7 +321,7 @@ export default function StudentEvaluationApp() {
             (placement) =>
               placement.schoolYear === selectedOverviewYear &&
               placement.grade === userProfile.grade &&
-              placement.homeroom === userProfile.homeroom
+              (!userProfile.homeroom || placement.homeroom === userProfile.homeroom)
           ),
     [isAdmin, overviewPlacements, selectedOverviewYear, userProfile.grade, userProfile.homeroom]
   );
@@ -343,15 +352,14 @@ export default function StudentEvaluationApp() {
     let activeUid: string | null | undefined;
 
     async function startAuthentication() {
-      const currentUrl = new URL(window.location.href);
-      const isInvitationHandoff = currentUrl.searchParams.get("invited") === "1";
-
-      if (isInvitationHandoff) {
-        await auth.authStateReady();
-        if (auth.currentUser) await signOut(auth);
-        currentUrl.searchParams.delete("invited");
-        window.history.replaceState({}, "", `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-      }
+      const invitationHandoff = await prepareInvitationHandoff({
+        href: window.location.href,
+        waitForAuthReady: () => auth.authStateReady(),
+        hasCurrentUser: () => Boolean(auth.currentUser),
+        signOutCurrentUser: () => signOut(auth),
+        replaceUrl: (url) => window.history.replaceState({}, "", url)
+      });
+      if (invitationHandoff) setInvitationHandoffComplete(true);
 
       if (cancelled) return;
       unsubscribe = onIdTokenChanged(auth, async (user) => {
@@ -730,18 +738,31 @@ export default function StudentEvaluationApp() {
     memberId: string,
     access: { role: UserRole; grade: string; homeroom: string }
   ) {
-    const updatedMember = await updateOrganizationMemberAccess(memberId, access);
+    const previousMember = teamMembers.find((member) => member.id === memberId);
     setTeamMembers((current) =>
-      current.map((member) => (member.id === updatedMember.id ? updatedMember : member))
+      current.map((member) => (member.id === memberId ? { ...member, ...access } : member))
     );
-    recordAudit(
-      "Changed team access",
-      "Team",
-      updatedMember.email,
-      updatedMember.role === "Admin"
-        ? "Assigned Admin access."
-        : `Assigned ${updatedMember.role} to Grade ${updatedMember.grade || "-"}, HR ${updatedMember.homeroom || "-"}.`
-    );
+    try {
+      const updatedMember = await updateOrganizationMemberAccess(memberId, access);
+      setTeamMembers((current) =>
+        current.map((member) => (member.id === updatedMember.id ? updatedMember : member))
+      );
+      recordAudit(
+        "Changed team access",
+        "Team",
+        updatedMember.email,
+        updatedMember.role === "Admin"
+          ? "Assigned Admin access."
+          : `Assigned ${updatedMember.role} to Grade ${updatedMember.grade || "-"}, HR ${updatedMember.homeroom || "All home rooms"}.`
+      );
+    } catch (error) {
+      if (previousMember) {
+        setTeamMembers((current) =>
+          current.map((member) => (member.id === previousMember.id ? previousMember : member))
+        );
+      }
+      throw error;
+    }
   }
 
   async function deleteTeamMember(memberId: string) {
@@ -793,6 +814,12 @@ export default function StudentEvaluationApp() {
         setOverviewDuplicateConflicts([]);
       }
 
+      const studentRowsForSync = isAdmin
+        ? lastSavedWorkspaceState?.pendingStudentSync
+          ? rowsForSave
+          : studentRowsNeedingSqlSync(lastSavedWorkspaceState?.rows ?? [], rowsForSave)
+        : [];
+      const studentSyncRequired = studentRowsForSync.length > 0;
       const pendingWorkspaceState: SavedWorkspaceState = {
         rows: rowsForSave,
         placements: placementsForSave,
@@ -801,15 +828,18 @@ export default function StudentEvaluationApp() {
         lockedOverviewYears,
         auditEvents,
         importLogs,
-        pendingStudentSync: isAdmin
+        pendingStudentSync: studentSyncRequired
       };
       const firstSavedWorkspaceState = await savePrototypeWorkspaceState(pendingWorkspaceState);
       let result = { createdCount: 0, updatedCount: 0 };
       let workspaceState = firstSavedWorkspaceState;
-      if (isAdmin) {
+      if (studentSyncRequired) {
         workspaceSavedWithPendingSync = firstSavedWorkspaceState;
+        // This save already owns the SQL sync. Claim the pending state before
+        // publishing it so the reload-recovery effect cannot start a duplicate sync.
+        pendingStudentSyncAttemptRef.current = firstSavedWorkspaceState;
         setLastSavedWorkspaceState(firstSavedWorkspaceState);
-        result = await saveStudentsToDatabase(rowsForSave);
+        result = await saveStudentsToDatabase(studentRowsForSync);
         workspaceState = await savePrototypeWorkspaceState({
           ...firstSavedWorkspaceState,
           pendingStudentSync: false
@@ -830,14 +860,18 @@ export default function StudentEvaluationApp() {
           ? "Saved profile data to Firebase."
           : !isAdmin
           ? "Saved assessment results for your assigned class."
-          : `Saved to Firebase. ${result.createdCount} new student${result.createdCount === 1 ? "" : "s"} added; ${result.updatedCount} updated.`
+          : studentSyncRequired
+          ? `Saved to Firebase and synchronized student changes. ${result.createdCount} new student${result.createdCount === 1 ? "" : "s"} added; ${result.updatedCount} updated.`
+          : "Saved to Firebase. No student database synchronization was needed."
       );
       recordAudit(
         "Saved table",
         "Firebase Data Connect",
         isAdmin ? "Student table" : "Assigned assessment table",
         isAdmin
-          ? "Saved visible student rows to the SQL Student table."
+          ? studentSyncRequired
+            ? `Saved ${studentRowsForSync.length} changed student identit${studentRowsForSync.length === 1 ? "y" : "ies"} to the SQL Student table.`
+            : "Saved workspace changes; student identities were already synchronized."
           : "Saved evaluator-visible assessment results through the server-enforced classroom scope."
       );
     } catch (error) {
@@ -1531,7 +1565,7 @@ export default function StudentEvaluationApp() {
   }
 
   if (!authUser) {
-    return <AuthScreen />;
+    return <AuthScreen invitationHandoffComplete={invitationHandoffComplete} />;
   }
 
   if (organizationAccess === "uninvited") {
@@ -1687,7 +1721,6 @@ export default function StudentEvaluationApp() {
                 onYearChange={setSelectedOverviewYear}
                 onGradeChange={setSelectedOverviewGrade}
                 scopeLocked={!isAdmin}
-                assignedHomeroom={userProfile.homeroom}
                 openNotes={setActiveNoteStudentId}
                 recordAudit={recordAudit}
                 saveStatus={saveStatus}
@@ -1784,7 +1817,7 @@ export default function StudentEvaluationApp() {
             currentRole={currentUserRole}
             teamMembers={teamMembers}
             onAccessChange={changeTeamMemberAccess}
-            assignmentHomerooms={teamAssignmentHomerooms(overviewPlacements, schoolYears[0])}
+            assignmentHomerooms={assignmentHomerooms}
             onDeleteMember={deleteTeamMember}
             events={auditEvents}
             pendingAuditEventIds={pendingAuditEventIds}
@@ -1955,7 +1988,7 @@ type UploadedReport = {
   storagePath: string;
 };
 
-function AuthScreen() {
+function AuthScreen({ invitationHandoffComplete }: { invitationHandoffComplete: boolean }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [authMessage, setAuthMessage] = useState("");
@@ -2006,6 +2039,12 @@ function AuthScreen() {
           <h1>Sign in</h1>
           <p>Accounts are created by an administrator. Use the email address from your invitation.</p>
         </div>
+
+        {invitationHandoffComplete ? (
+          <div className="auth-message">
+            Your password is set. The previous account was signed out; sign in with your new credentials.
+          </div>
+        ) : null}
 
         <form className="auth-form" onSubmit={submitAuth}>
           <label>
@@ -2099,6 +2138,9 @@ function friendlyCallableError(error: unknown) {
   if (message.includes("not-found")) return "That user is no longer part of this organization.";
   if (message.includes("unavailable")) {
     return "The organization service is temporarily unavailable. Try again.";
+  }
+  if (message.includes("functions/internal") || /\bINTERNAL\b/.test(message)) {
+    return "Firebase could not save the team access change. Try again or refresh the Team list.";
   }
   return message.replace(/^Firebase:\s*/i, "") || "The request could not be completed.";
 }
@@ -2738,7 +2780,6 @@ function InlineEntryTable({
   onYearChange,
   onGradeChange,
   scopeLocked,
-  assignedHomeroom,
   openNotes,
   recordAudit,
   saveStatus,
@@ -2758,7 +2799,6 @@ function InlineEntryTable({
   onYearChange: (year: string) => void;
   onGradeChange: (grade: string) => void;
   scopeLocked: boolean;
-  assignedHomeroom: string;
   openNotes: (studentId: string) => void;
   recordAudit: RecordAudit;
   saveStatus: SaveStatus;
@@ -2885,7 +2925,6 @@ function InlineEntryTable({
               ))}
             </select>
           </label>
-          {scopeLocked ? <span className="entry-scope-note">Assigned HR: {assignedHomeroom || "Not assigned"}</span> : null}
           <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
             {fullScreen ? "Exit full screen" : "Full screen"}
           </button>
@@ -3296,17 +3335,19 @@ function VpOverview({
             Add homeroom / students
           </button>
 
-          <button className={locked ? "small-action muted-action" : "small-action"} onClick={toggleLock} type="button">
-            {locked ? "Unlock" : "Lock"}
-          </button>
+          <div className="overview-toolbar-actions" role="group" aria-label="Overview display actions">
+            <button className={locked ? "small-action muted-action" : "small-action"} onClick={toggleLock} type="button">
+              {locked ? "Unlock" : "Lock"}
+            </button>
 
-          <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
-            {fullScreen ? "Exit full screen" : "Full screen"}
-          </button>
+            <button className="small-action fullscreen-action" onClick={onToggleFullScreen} type="button">
+              {fullScreen ? "Exit full screen" : "Full screen"}
+            </button>
 
-          <button className="small-action overview-options-action" onClick={() => setOptionsOpen(true)} type="button">
-            Options
-          </button>
+            <button className="small-action overview-options-action" onClick={() => setOptionsOpen(true)} type="button">
+              Options
+            </button>
+          </div>
         </div>
 
         <div className="overview-student-search-row">
@@ -3925,19 +3966,10 @@ function ProfilePage({
     patch: Partial<Pick<TeamMember, "role" | "grade" | "homeroom">>
   ) {
     setRoleUpdatingId(member.id);
-    setTeamMessage("");
+    setTeamMessage("Saving team access...");
     try {
-      const role = patch.role ?? member.role;
-      const firstAssignedGrade = Object.entries(assignmentHomerooms)
-        .find(([, homerooms]) => homerooms.length > 0)?.[0] ?? "";
-      const requestedGrade = patch.grade ?? member.grade;
-      const grade = role === "Admin" ? "" : requestedGrade || firstAssignedGrade;
-      const homerooms = assignmentHomerooms[grade] ?? [];
-      const requestedHomeroom = role === "Admin" ? "" : patch.homeroom ?? member.homeroom;
-      const homeroom = requestedHomeroom && homerooms.includes(requestedHomeroom)
-        ? requestedHomeroom
-        : homerooms[0] ?? "";
-      await onAccessChange(member.id, { role, grade, homeroom });
+      const access = resolveTeamMemberAccess(member, patch, assignmentHomerooms);
+      await onAccessChange(member.id, access);
       setTeamMessage("Team access updated.");
     } catch (error) {
       setTeamMessage(friendlyCallableError(error));
@@ -4024,9 +4056,11 @@ function ProfilePage({
         ) : null}
       </div>
 
-      <div className="profile-save-row">
-        <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} compact />
-      </div>
+      {visibleTab === "profile" ? (
+        <div className="profile-save-row">
+          <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} compact />
+        </div>
+      ) : null}
 
       {visibleTab === "profile" ? (
         <div className="panel profile-form">
@@ -4046,7 +4080,7 @@ function ProfilePage({
               </div>
               <div className="profile-readonly-field">
                 <span>Home room</span>
-                <strong>{profile.homeroom || "Not assigned"}</strong>
+                <strong>{profile.homeroom || "All home rooms"}</strong>
               </div>
             </>
           ) : null}
@@ -4161,7 +4195,7 @@ function ProfilePage({
                       value={member.homeroom}
                       onChange={(event) => updateTeamAccess(member, { homeroom: event.target.value })}
                     >
-                      <option value="">Choose home room</option>
+                      <option value="">All home rooms (optional)</option>
                       {(assignmentHomerooms[member.grade] ?? []).map((homeroom) => (
                         <option key={homeroom} value={homeroom}>{homeroom}</option>
                       ))}
@@ -6478,21 +6512,6 @@ function overviewColumnsFor(template: AssessmentTemplate): ColDef<EntryRow>[] {
 
 function normalizeStudentName(name: string) {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function teamAssignmentHomerooms(placements: StudentPlacement[], schoolYear?: string) {
-  const assignments: Record<string, string[]> = Object.fromEntries(
-    ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((grade) => [grade, []])
-  );
-  if (!schoolYear) return assignments;
-
-  for (const placement of placements) {
-    if (placement.schoolYear !== schoolYear) continue;
-    const homerooms = assignments[placement.grade] ?? (assignments[placement.grade] = []);
-    if (!homerooms.includes(placement.homeroom)) homerooms.push(placement.homeroom);
-  }
-  for (const homerooms of Object.values(assignments)) homerooms.sort();
-  return assignments;
 }
 
 function overviewRowsForSelection(

@@ -6,6 +6,7 @@ import {
   studentSyncBatches,
   type SavedStudent
 } from "../functions/src/student-sync";
+import { studentRowsNeedingSqlSync } from "./student-sync";
 
 function savedStudent(studentNumber: string): SavedStudent {
   return {
@@ -71,5 +72,31 @@ describe("server student synchronization", () => {
 
     expect(plan.rows).toHaveLength(2);
     expect(new Set(plan.rows.map((row) => row.id)).size).toBe(2);
+  });
+});
+
+describe("client student synchronization selection", () => {
+  it("returns only new and renamed student identities", () => {
+    const previousRows = [
+      { id: "100", student: "Alex Morgan" },
+      { id: "200", student: "Jamie Lee" }
+    ];
+    const nextRows = [
+      { id: "100", student: "Alex Morgan" },
+      { id: "200", student: "Jamie Li" },
+      { id: "300", student: "Taylor Singh" }
+    ];
+
+    expect(studentRowsNeedingSqlSync(previousRows, nextRows)).toEqual([
+      { id: "200", student: "Jamie Li" },
+      { id: "300", student: "Taylor Singh" }
+    ]);
+  });
+
+  it("ignores equivalent name formatting", () => {
+    expect(studentRowsNeedingSqlSync(
+      [{ id: "100", student: "Alex Morgan" }],
+      [{ id: "100", student: "  ALEX   MORGAN " }]
+    )).toEqual([]);
   });
 });

@@ -4,11 +4,24 @@ const firebaseToolsRoot = path.join(process.env.APPDATA, "npm", "node_modules", 
 const auth = require(path.join(firebaseToolsRoot, "auth"));
 const { executeSqlCmdsAsIamUser } = require(path.join(firebaseToolsRoot, "gcp", "cloudsql", "connect"));
 
-const projectId = "student-assessment-2d869";
+const productionProjectId = "student-assessment-2d869";
+const testProjectId = "student-assessment-test";
+const projectArgumentIndex = process.argv.indexOf("--project");
+const projectId =
+  projectArgumentIndex >= 0 && process.argv[projectArgumentIndex + 1]
+    ? process.argv[projectArgumentIndex + 1]
+    : testProjectId;
 const instanceId = "student-assessment-db";
 const databaseId = "student_assessment";
 const accountEmail = process.env.FIREBASE_ACCOUNT || "stevemackidd@gmail.com";
 const wipe = process.argv.includes("--wipe");
+const allowProduction = process.argv.includes("--allow-production");
+
+if (projectId === productionProjectId && !allowProduction) {
+  throw new Error(
+    "Refusing to target production without both --project student-assessment-2d869 and --allow-production."
+  );
+}
 
 const appTables = [
   "assessment_file_link",

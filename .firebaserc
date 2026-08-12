@@ -1,6 +1,6 @@
 {
   "projects": {
-    "default": "student-assessment-2d869",
+    "default": "student-assessment-test",
     "production": "student-assessment-2d869",
     "test": "student-assessment-test"
   },
@@ -9,6 +9,11 @@
     "student-assessment-2d869": {
       "extensionInstances": {
         "firestore-send-email": "4df577a9321fbd617f7f38d1363a3c24c8e201c6063b25b037970b97e06fe4cf"
+      }
+    },
+    "student-assessment-test": {
+      "extensionInstances": {
+        "firestore-send-email": "da7c747aac5e3ed910a7244d65a2f33eb0c867ed57ecb1464526be1a4dda145d"
       }
     }
   }

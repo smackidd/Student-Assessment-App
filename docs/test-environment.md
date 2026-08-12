@@ -16,6 +16,14 @@ The hosted test environment is isolated from production.
 
 The repeated SQL resource names are safe because they live in different Firebase and Google Cloud projects.
 
+## Local development
+
+Local development and local test deployments must use `NEXT_PUBLIC_APP_ENV=test` and the
+`student-assessment-test` Firebase project. `.env.local.example` is the canonical local template.
+`lib/firebase.ts` rejects a production project ID when the app is opened from localhost, a private
+LAN address, or a Tailscale address. The Firebase CLI `default` alias also points to test; production
+commands must use the explicit `production` alias.
+
 ## Deploy test
 
 Run validation from `student-evaluation-app`:
@@ -52,11 +60,15 @@ Use `npm run deploy:test -- -Preview` when a one-off preview deployment is prefe
 
 1. Deploy the candidate to the test site.
 2. Run automated tests and complete user acceptance testing with synthetic or anonymized data.
-3. Apply and verify database migrations in test.
-4. Back up production before a production migration.
-5. Deploy the same reviewed commit to production.
+3. Add every database or Authentication change to `docs/migrations.md`.
+4. Apply and verify each pending migration in test, recording the evidence in the ledger.
+5. Back up production before a production migration.
+6. Apply the same verified migrations to production and record the result.
+7. Deploy the same reviewed commit to production.
 
-Never copy identifiable student data into the test project.
+The test project currently contains an explicitly authorized production-derived baseline. Treat it
+as sensitive: restrict access, do not use it for demonstrations, and do not perform another data
+refresh without explicit approval. Prefer synthetic or anonymized data for new test records.
 
 ## Remaining integration requirements
 

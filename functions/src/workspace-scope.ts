@@ -126,11 +126,13 @@ export function scopeWorkspaceForAccess(state: WorkspaceState, access: Workspace
   }));
   const rowsById = new Map(state.rows.map((row) => [row.id, row]));
   const scopedRows = scope.placements
-    .map((placement) => rowsById.get(placement.studentId))
-    .filter((row): row is WorkspaceRow => Boolean(row))
-    .map((row) => ({
+    .flatMap((placement) => {
+      const row = rowsById.get(placement.studentId);
+      return row ? [{ placement, row }] : [];
+    })
+    .map(({ placement, row }) => ({
       ...row,
-      homeroom: access.homeroom,
+      homeroom: placement.homeroom,
       assessmentValues: filterValues(row.assessmentValues, scope.visibleKeys),
       septP1Wpm: null,
       septP1Epm: null,
@@ -176,7 +178,7 @@ export function mergeWorkspaceForAccess(
   }
 
   const scope = teacherScope(current, access);
-  assertExactScopedRows(proposed, current, scope.placements, access);
+  assertExactScopedRows(proposed, current, scope.placements);
   const proposedById = new Map(proposed.rows.map((row) => [row.id, row]));
   const authorizedStudentIds = new Set(scope.placements.map((placement) => placement.studentId));
   const rows = current.rows.map((row) => {
@@ -248,10 +250,10 @@ function recordId(value: unknown) {
 }
 
 function teacherScope(state: WorkspaceState, access: WorkspaceAccess) {
-  if (!access.grade || !access.homeroom) {
-    throw new WorkspaceScopeError("failed-precondition", "Teacher / EA access requires an assigned grade and home room.");
+  if (!access.grade) {
+    throw new WorkspaceScopeError("failed-precondition", "Teacher / EA access requires an assigned grade.");
   }
-  const schoolYear = state.schoolYears[0]?.trim();
+  const schoolYear = latestSchoolYear(state.schoolYears);
   if (!schoolYear) {
     throw new WorkspaceScopeError("failed-precondition", "An Admin must configure the current school year before evaluators can continue.");
   }
@@ -259,12 +261,11 @@ function teacherScope(state: WorkspaceState, access: WorkspaceAccess) {
     (placement) =>
       placement.schoolYear === schoolYear
       && placement.grade === access.grade
-      && placement.homeroom === access.homeroom
+      && (!access.homeroom || placement.homeroom === access.homeroom)
   );
-  const templates = state.templates.filter(
-    (template) => assessmentSupportsGrade(template.gradeScope, access.grade)
-      && template.fields.some((field) => field.visibility === "evaluators")
-  );
+  // Assessment definitions belong to the organization. Grade and home room
+  // assignments scope students and results, not the assessment catalog.
+  const templates = state.templates;
   const visibleKeys = assessmentValueKeys(templates, schoolYear, access.grade, false);
   const writableKeys = assessmentValueKeys(templates, schoolYear, access.grade, true);
   return { schoolYear, placements, templates, visibleKeys, writableKeys };
@@ -328,25 +329,15 @@ function addAssessmentKeys(
   }
 }
 
-function assessmentSupportsGrade(gradeScope: string, assignedGrade: string) {
-  const assigned = Number(assignedGrade.match(/\d+/)?.[0]);
-  if (!Number.isSafeInteger(assigned)) return false;
-  const range = gradeScope.match(/(\d+)\s*[-–]\s*(\d+)/);
-  if (range) {
-    const minimum = Number(range[1]);
-    const maximum = Number(range[2]);
-    return assigned >= Math.min(minimum, maximum) && assigned <= Math.max(minimum, maximum);
-  }
-  return (gradeScope.match(/\d+/g) ?? []).map(Number).includes(assigned);
-}
-
 function assertExactScopedRows(
   proposed: WorkspaceState,
   current: WorkspaceState,
-  authorizedPlacements: WorkspacePlacement[],
-  access: WorkspaceAccess
+  authorizedPlacements: WorkspacePlacement[]
 ) {
   const authorizedIds = new Set(authorizedPlacements.map((placement) => placement.studentId));
+  const authorizedHomerooms = new Map(
+    authorizedPlacements.map((placement) => [placement.studentId, placement.homeroom])
+  );
   const proposedIds = new Set(proposed.rows.map((row) => row.id));
   if (authorizedIds.size !== proposedIds.size || [...proposedIds].some((id) => !authorizedIds.has(id))) {
     throw new WorkspaceScopeError("permission-denied", "Students cannot be added to or removed from an evaluator save.");
@@ -354,7 +345,7 @@ function assertExactScopedRows(
   const currentById = new Map(current.rows.map((row) => [row.id, row]));
   for (const row of proposed.rows) {
     const currentRow = currentById.get(row.id);
-    if (!currentRow || row.student !== currentRow.student || row.homeroom !== access.homeroom) {
+    if (!currentRow || row.student !== currentRow.student || row.homeroom !== authorizedHomerooms.get(row.id)) {
       throw new WorkspaceScopeError("permission-denied", "Student identity and home room fields are read-only for evaluators.");
     }
   }
@@ -363,6 +354,18 @@ function assertExactScopedRows(
   if (expectedPlacements.size !== proposedPlacements.size || [...proposedPlacements].some((key) => !expectedPlacements.has(key))) {
     throw new WorkspaceScopeError("permission-denied", "Student placements are read-only for evaluators.");
   }
+}
+
+function latestSchoolYear(schoolYears: string[]) {
+  return [...schoolYears]
+    .map((year) => year.trim())
+    .filter(Boolean)
+    .sort((left, right) => schoolYearStart(right) - schoolYearStart(left))[0] ?? "";
+}
+
+function schoolYearStart(year: string) {
+  const start = Number(year.split("-")[0]);
+  return Number.isFinite(start) ? start : Number.NEGATIVE_INFINITY;
 }
 
 function filterValues(values: Record<string, WorkspaceAssessmentValue> | undefined, allowed: Set<string>) {

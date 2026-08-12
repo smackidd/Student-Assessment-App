@@ -12,6 +12,7 @@ const allowedWpmKey = "year_2026_2027__grade_3__oral_reading_fluency_orf__fall_f
 const calculatedCwpmKey = "year_2026_2027__grade_3__oral_reading_fluency_orf__fall_fall__passage_1_p1__cwpm_cwpm";
 const privateKey = "year_2026_2027__grade_3__oral_reading_fluency_orf__fall_fall__passage_1_p1__private_note_private";
 const oldYearKey = "year_2025_2026__grade_3__oral_reading_fluency_orf__fall_fall__passage_1_p1__wpm_wpm";
+const organizationAssessmentKey = "year_2026_2027__grade_3__grade_six_assessment__fall__score";
 
 const teacher: WorkspaceAccess = {
   uid: "teacher-1",
@@ -188,9 +189,87 @@ describe("workspace evaluator scope", () => {
     );
   });
 
-  it("denies evaluator access without both assignments", () => {
-    expect(() => scopeWorkspaceForAccess(workspace(), { ...teacher, homeroom: "" })).toThrow(
-      "Teacher / EA access requires an assigned grade and home room."
+  it("uses an optional home room to grant access to every room in the assigned grade", () => {
+    const gradeWideTeacher = { ...teacher, homeroom: "" };
+    const scoped = scopeWorkspaceForAccess(workspace(), gradeWideTeacher);
+
+    expect(scoped.placements).toEqual([
+      { studentId: "student-a", schoolYear: "2026-2027", grade: "3", homeroom: "3A" },
+      { studentId: "student-b", schoolYear: "2026-2027", grade: "3", homeroom: "3B" }
+    ]);
+    expect(scoped.rows.map((row) => ({ id: row.id, homeroom: row.homeroom }))).toEqual([
+      { id: "student-a", homeroom: "3A" },
+      { id: "student-b", homeroom: "3B" }
+    ]);
+
+    scoped.rows[1].assessmentValues![allowedWpmKey] = 55;
+    const merged = mergeWorkspaceForAccess(workspace(), scoped, gradeWideTeacher);
+    expect(merged.rows[1].assessmentValues?.[allowedWpmKey]).toBe(55);
+  });
+
+  it("returns every organization assessment regardless of the teacher's assigned grade", () => {
+    const state = workspace();
+    state.templates.push(
+      {
+        id: "grade-six-assessment",
+        name: "Grade Six Assessment",
+        gradeScope: "Grade 6",
+        rounds: [{ id: "fall", label: "Fall" }],
+        fields: [{
+          id: "score",
+          name: "Score",
+          dataType: "integer",
+          isCalculated: false,
+          visibility: "evaluators"
+        }]
+      },
+      {
+        id: "admin-assessment",
+        name: "Admin Assessment",
+        gradeScope: "Grade 12",
+        rounds: [{ id: "fall", label: "Fall" }],
+        fields: [{
+          id: "private-score",
+          name: "Private score",
+          dataType: "integer",
+          isCalculated: false,
+          visibility: "admin"
+        }]
+      }
+    );
+    state.rows[0].assessmentValues![organizationAssessmentKey] = 61;
+
+    const scoped = scopeWorkspaceForAccess(state, teacher);
+
+    expect(scoped.templates.map((template) => template.id)).toEqual([
+      "orf",
+      "grade-six-assessment",
+      "admin-assessment"
+    ]);
+    expect(scoped.templates[1].fields.map((field) => field.id)).toEqual(["score"]);
+    expect(scoped.templates[2].fields).toEqual([]);
+    expect(scoped.rows[0].assessmentValues?.[organizationAssessmentKey]).toBe(61);
+
+    scoped.rows[0].assessmentValues![organizationAssessmentKey] = 64;
+    const merged = mergeWorkspaceForAccess(state, scoped, teacher);
+    expect(merged.rows[0].assessmentValues?.[organizationAssessmentKey]).toBe(64);
+  });
+
+  it("uses the newest configured school year even when the saved list is out of order", () => {
+    const state = workspace();
+    state.schoolYears = ["2025-2026", "2026-2027"];
+
+    const scoped = scopeWorkspaceForAccess(state, teacher);
+
+    expect(scoped.schoolYears).toEqual(["2026-2027"]);
+    expect(scoped.placements).toEqual([
+      { studentId: "student-a", schoolYear: "2026-2027", grade: "3", homeroom: "3A" }
+    ]);
+  });
+
+  it("denies evaluator access without a grade assignment", () => {
+    expect(() => scopeWorkspaceForAccess(workspace(), { ...teacher, grade: "", homeroom: "" })).toThrow(
+      "Teacher / EA access requires an assigned grade."
     );
   });
 

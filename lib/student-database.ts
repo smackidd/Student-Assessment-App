@@ -152,7 +152,7 @@ export async function loadStudentsFromDatabase() {
   );
 }
 
-export async function saveStudentsToDatabase(rows: OrfResultRow[]) {
+export async function saveStudentsToDatabase(rows: Array<Pick<OrfResultRow, "id" | "student">>) {
   await ensureFirebaseUser();
   const syncStudents = httpsCallable<
     { students: Array<{ id: string; student: string }> },
