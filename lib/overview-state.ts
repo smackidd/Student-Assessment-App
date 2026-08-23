@@ -29,6 +29,10 @@ export function parseOverviewStudentCount(rawValue: string) {
   return Number.isSafeInteger(count) && count >= 1 && count <= 40 ? count : null;
 }
 
+export function canImportOverviewYear(schoolYear: string, lockedYears: string[]) {
+  return !lockedYears.includes(schoolYear);
+}
+
 type DeleteSchoolYearInput = {
   rows: OrfResultRow[];
   placements: StudentPlacement[];

@@ -59,7 +59,15 @@ import {
   validateAssessmentValue,
   type EntryRow
 } from "@/lib/assessment-entry";
+import { applySpreadsheetAssessmentValues } from "@/lib/spreadsheet-import";
 import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
+import { resolveScaleCodeEditorValue, validScaleCodeValue } from "@/lib/scale-code";
+import {
+  canCreateStudentNote,
+  canMutateStudentNote,
+  filterStudentNotesForRole,
+  type StudentNotePermission
+} from "@/lib/student-notes";
 import {
   loadPrototypeWorkspaceState,
   revertSpreadsheetImport,
@@ -69,6 +77,7 @@ import {
 import {
   buildStudentIdentityOptions,
   buildStudentSearchOptions,
+  canImportOverviewYear,
   deleteSchoolYearFromOverview,
   moveStudentToExistingHomeroom,
   parseOverviewStudentCount,
@@ -168,7 +177,6 @@ const pastelRoundColors = [
   "#f7e0d2"
 ];
 
-type StudentNotePermission = "admin_only" | "all";
 type SaveStatus = "saved" | "dirty" | "saving" | "error";
 type ImportRevertOutcome = "reverted" | "reverted-audit-pending" | "cancelled" | "unavailable";
 type AppAuditEvent = OrganizationAuditEvent;
@@ -290,9 +298,10 @@ export default function StudentEvaluationApp() {
     () => teamAssignmentHomerooms(overviewPlacements, newestSchoolYear),
     [newestSchoolYear, overviewPlacements]
   );
-  const activeNoteStudent = activeNoteStudentId
-    ? orfRows.find((row) => row.id === activeNoteStudentId) ?? null
-    : null;
+  const authorizedNotes = useMemo(
+    () => filterStudentNotesForRole(notes, currentUserRole),
+    [currentUserRole, notes]
+  );
   const activeOverviewRows = useMemo(
     () =>
       overviewPlacements
@@ -330,6 +339,9 @@ export default function StudentEvaluationApp() {
     const authorizedStudentIds = new Set(authorizedPlacements.map((placement) => placement.studentId));
     return orfRows.filter((row) => authorizedStudentIds.has(row.id));
   }, [authorizedPlacements, isAdmin, orfRows]);
+  const activeNoteStudent = activeNoteStudentId
+    ? authorizedRows.find((row) => row.id === activeNoteStudentId) ?? null
+    : null;
   const overviewHomerooms = useMemo(
     () =>
       Array.from(
@@ -380,6 +392,8 @@ export default function StudentEvaluationApp() {
           setNavigationReadyForUid(null);
           setPendingAuditEventIds(new Set());
           pendingStudentSyncAttemptRef.current = null;
+          setActiveNoteStudentId(null);
+          setOverviewDialog(null);
         }
 
         if (!user) {
@@ -498,26 +512,29 @@ export default function StudentEvaluationApp() {
     const preference = readNavigationPreference(
       authUser.uid,
       currentUserRole,
-      templates.map((template) => template.id)
+      templates.map((template) => template.id),
+      schoolYears
     );
     setActiveView(preference.activeView);
     setAssessmentPageTab(preference.assessmentPageTab);
     setProfilePageTab(preference.profilePageTab);
     if (preference.selectedAssessmentId) setSelectedId(preference.selectedAssessmentId);
+    if (preference.selectedSchoolYear) setSelectedOverviewYear(preference.selectedSchoolYear);
     setTableFullScreen(false);
     setNavigationReadyForUid(authUser.uid);
-  }, [authReady, authUser, currentUserRole, navigationReadyForUid, organizationAccess, templates, workspaceReadyForUid]);
+  }, [authReady, authUser, currentUserRole, navigationReadyForUid, organizationAccess, schoolYears, templates, workspaceReadyForUid]);
 
   useEffect(() => {
     if (!authUser || organizationAccess !== "active" || navigationReadyForUid !== authUser.uid) return;
     writeNavigationPreference(authUser.uid, {
-      version: 1,
+      version: 2,
       activeView,
       assessmentPageTab,
       profilePageTab,
-      selectedAssessmentId: selectedId
+      selectedAssessmentId: selectedId,
+      selectedSchoolYear: selectedOverviewYear
     });
-  }, [activeView, assessmentPageTab, authUser, navigationReadyForUid, organizationAccess, profilePageTab, selectedId]);
+  }, [activeView, assessmentPageTab, authUser, navigationReadyForUid, organizationAccess, profilePageTab, selectedId, selectedOverviewYear]);
 
   useEffect(() => {
     if (!authUser || organizationAccess !== "active" || !isAdmin) return;
@@ -670,14 +687,14 @@ export default function StudentEvaluationApp() {
 
   useEffect(() => {
     if (organizationAccess !== "active" || isAdmin) return;
-    const currentSchoolYear = schoolYears[0];
+    const currentSchoolYear = newestSchoolYear;
     if (currentSchoolYear && selectedOverviewYear !== currentSchoolYear) {
       setSelectedOverviewYear(currentSchoolYear);
     }
     if (userProfile.grade && selectedOverviewGrade !== userProfile.grade) {
       setSelectedOverviewGrade(userProfile.grade);
     }
-  }, [isAdmin, organizationAccess, schoolYears, selectedOverviewGrade, selectedOverviewYear, userProfile.grade]);
+  }, [isAdmin, newestSchoolYear, organizationAccess, selectedOverviewGrade, selectedOverviewYear, userProfile.grade]);
 
   function markUnsaved(message = "You have unsaved table changes.") {
     setSaveStatus("dirty");
@@ -1037,16 +1054,16 @@ export default function StudentEvaluationApp() {
   }
 
   function addNote(studentId: string, body: string, permission: StudentNotePermission) {
-    const student = orfRows.find((row) => row.id === studentId);
+    const student = authorizedRows.find((row) => row.id === studentId);
     const trimmed = body.trim();
-    if (!student || !trimmed) return;
+    if (!student || !trimmed || !canCreateStudentNote(permission, currentUserRole)) return;
     setNotes((current) => [
       {
         id: `note-${Date.now()}`,
         studentId,
         permission,
         body: trimmed,
-        author: permission === "admin_only" ? "Admin" : "Teacher / EA",
+        author: isAdmin ? "Admin" : "Teacher / EA",
         createdAt: new Date().toISOString().slice(0, 10)
       },
       ...current
@@ -1056,7 +1073,9 @@ export default function StudentEvaluationApp() {
 
   function editNote(noteId: string, body: string, permission: StudentNotePermission) {
     const existing = notes.find((note) => note.id === noteId);
-    const student = existing ? orfRows.find((row) => row.id === existing.studentId) : null;
+    if (!existing || !canMutateStudentNote(existing, currentUserRole) || !canCreateStudentNote(permission, currentUserRole)) return;
+    const student = authorizedRows.find((row) => row.id === existing.studentId);
+    if (!student) return;
     setNotes((current) =>
       current.map((note) =>
         note.id === noteId
@@ -1071,7 +1090,9 @@ export default function StudentEvaluationApp() {
 
   function deleteNote(noteId: string) {
     const existing = notes.find((note) => note.id === noteId);
-    const student = existing ? orfRows.find((row) => row.id === existing.studentId) : null;
+    if (!existing || !canMutateStudentNote(existing, currentUserRole)) return;
+    const student = authorizedRows.find((row) => row.id === existing.studentId);
+    if (!student) return;
     setNotes((current) => current.filter((note) => note.id !== noteId));
     if (existing && student) {
       recordAudit("Deleted note", "Student note", student.student, "Deleted a student note.");
@@ -1253,6 +1274,9 @@ export default function StudentEvaluationApp() {
   }
 
   async function importOverviewSpreadsheet({ file, schoolYear, grade }: OverviewImportRequest): Promise<OverviewImportResult> {
+    if (!canImportOverviewYear(schoolYear, lockedOverviewYears)) {
+      throw new Error(`Import is disabled because ${schoolYear} is locked. Unlock the year before importing.`);
+    }
     const parsed = await parseStudentImportFile(file, templates);
     const importId = `import-${Date.now()}`;
     const importedAt = new Date().toISOString();
@@ -1305,25 +1329,14 @@ export default function StudentEvaluationApp() {
         assessmentValues: { ...(baseRow.assessmentValues ?? {}) }
       };
 
-      importedStudent.values.forEach((cell) => {
-        if (cell.value === "" || cell.value === null || typeof cell.value === "undefined") return;
-        const validation = validateAssessmentTableEdit(
-          nextRow,
-          cell.match.assessment,
-          cell.match.fieldName,
-          cell.value,
-          { schoolYear, grade }
-        );
-        if (!validation.valid) {
-          validationErrors.push(`row ${importedStudent.sourceRowNumber} (${importedStudent.studentName}): ${validation.error}`);
-          return;
-        }
-        nextRow = updateAssessmentRowFromTableEdit(nextRow, cell.match.assessment, cell.match.fieldName, cell.value, {
-          schoolYear,
-          grade
-        });
-        dataCellCount += 1;
-      });
+      const assessmentImport = applySpreadsheetAssessmentValues(nextRow, importedStudent.values, { schoolYear, grade });
+      nextRow = assessmentImport.row;
+      dataCellCount += assessmentImport.importedValueCount;
+      validationErrors.push(
+        ...assessmentImport.validationErrors.map(
+          (error) => `row ${importedStudent.sourceRowNumber} (${importedStudent.studentName}): ${error}`
+        )
+      );
 
       nextRowsById.set(nextRow.id, nextRow);
       if (!existingRow) addedStudentIds.push(nextRow.id);
@@ -1714,7 +1727,7 @@ export default function StudentEvaluationApp() {
                 rows={activeOverviewRows}
                 setRows={setOrfRows}
                 selected={selected}
-                notes={notes}
+                notes={authorizedNotes}
                 schoolYears={schoolYears}
                 selectedYear={selectedOverviewYear}
                 selectedGrade={selectedOverviewGrade}
@@ -1736,7 +1749,7 @@ export default function StudentEvaluationApp() {
           <VpOverview
             rows={activeOverviewRows}
             templates={templates}
-            notes={notes}
+            notes={authorizedNotes}
             schoolYears={schoolYears}
             selectedYear={selectedOverviewYear}
             selectedGrade={selectedOverviewGrade}
@@ -1752,7 +1765,10 @@ export default function StudentEvaluationApp() {
             }}
             onAddYear={addSchoolYear}
             onDeleteYear={() => deleteSchoolYear(selectedOverviewYear)}
-            onOpenImport={() => setOverviewDialog({ type: "import" })}
+            onOpenImport={() => {
+              if (!canImportOverviewYear(selectedOverviewYear, lockedOverviewYears)) return;
+              setOverviewDialog({ type: "import" });
+            }}
             onOpenAdd={() => setOverviewDialog({ type: "add" })}
             onMoveStudent={(studentId) => setOverviewDialog({ type: "move", studentId })}
             onDeleteStudent={(studentId) => setOverviewDialog({ type: "delete", studentId })}
@@ -1839,8 +1855,10 @@ export default function StudentEvaluationApp() {
 
       {activeNoteStudent ? (
         <StudentNotesModal
+          key={`${activeNoteStudent.id}:${currentUserRole}`}
           student={activeNoteStudent}
-          notes={notes.filter((note) => note.studentId === activeNoteStudent.id)}
+          notes={authorizedNotes.filter((note) => note.studentId === activeNoteStudent.id)}
+          isAdmin={isAdmin}
           onClose={() => setActiveNoteStudentId(null)}
           addNote={addNote}
           editNote={editNote}
@@ -1861,6 +1879,7 @@ export default function StudentEvaluationApp() {
         <OverviewImportModal
           currentYear={selectedOverviewYear}
           currentGrade={selectedOverviewGrade}
+          lockedYears={lockedOverviewYears}
           onClose={() => setOverviewDialog(null)}
           onImport={importOverviewSpreadsheet}
           onRevert={revertImport}
@@ -3271,7 +3290,13 @@ function VpOverview({
     <section className={fullScreen ? "overview-panel table-card-fullscreen" : "overview-panel"}>
       <div className="panel overview-table-panel">
         <div className="overview-toolbar">
-          <button className="small-action" onClick={onOpenImport} type="button">
+          <button
+            className="small-action"
+            disabled={locked}
+            onClick={onOpenImport}
+            title={locked ? `Unlock ${selectedYear} before importing` : "Import a spreadsheet"}
+            type="button"
+          >
             Import
           </button>
 
@@ -4764,6 +4789,9 @@ function readableImportError(error: unknown) {
 
 type ImportColumnMatch = {
   assessment: AssessmentTemplate;
+  round: AssessmentRoundTemplate;
+  field: AssessmentFieldTemplate;
+  section?: AssessmentSectionTemplate;
   fieldName: string;
 };
 
@@ -4901,10 +4929,10 @@ function findImportColumnMatch(headers: string[], templates: AssessmentTemplate[
         if (!fieldMatchesRound(field, round) || !fieldHeaderLabelMatch(normalizedHeaders, field)) continue;
         const fieldSections = sectionsForRound.filter((section) => field.sectionIds?.includes(section.id));
         if (!fieldSections.length) {
-          return { assessment, fieldName: assessmentValueKey(assessment, round, field) };
+          return { assessment, round, field, fieldName: assessmentValueKey(assessment, round, field) };
         }
         const section = fieldSections.find((candidate) => exactHeaderLabelMatch(normalizedHeaders, [candidate.name, candidate.id]));
-        if (section) return { assessment, fieldName: assessmentValueKey(assessment, round, field, section) };
+        if (section) return { assessment, round, field, section, fieldName: assessmentValueKey(assessment, round, field, section) };
       }
     }
   }
@@ -4991,12 +5019,6 @@ function scaleCodesForField(field: AssessmentFieldTemplate) {
     .filter(Boolean);
 }
 
-function validScaleCodeValue(value: unknown, codes: string[]) {
-  const typedValue = String(value ?? "").trim();
-  if (!typedValue) return null;
-  return codes.find((code) => code.toLowerCase() === typedValue.toLowerCase()) ?? null;
-}
-
 function printableEditorCharacter(key?: string | null) {
   if (!key || key.length !== 1) return null;
   return key;
@@ -5040,6 +5062,7 @@ function serializeScaleRows(rows: ScaleRow[]) {
 function StudentNotesModal({
   student,
   notes,
+  isAdmin,
   onClose,
   addNote,
   editNote,
@@ -5047,6 +5070,7 @@ function StudentNotesModal({
 }: {
   student: OrfResultRow;
   notes: StudentNote[];
+  isAdmin: boolean;
   onClose: () => void;
   addNote: (studentId: string, body: string, permission: StudentNotePermission) => void;
   editNote: (noteId: string, body: string, permission: StudentNotePermission) => void;
@@ -5118,7 +5142,7 @@ function StudentNotesModal({
             Permissions
             <select value={draftPermission} onChange={(event) => setDraftPermission(event.target.value as StudentNotePermission)}>
               <option value="all">All</option>
-              <option value="admin_only">Admin only</option>
+              {isAdmin ? <option value="admin_only">Admin only</option> : null}
             </select>
           </label>
           <label>
@@ -5205,12 +5229,14 @@ function AddHomeroomModal({
 function OverviewImportModal({
   currentYear,
   currentGrade,
+  lockedYears,
   onClose,
   onImport,
   onRevert
 }: {
   currentYear: string;
   currentGrade: string;
+  lockedYears: string[];
   onClose: () => void;
   onImport: (request: OverviewImportRequest) => Promise<OverviewImportResult>;
   onRevert: (importLogId: string) => Promise<ImportRevertOutcome>;
@@ -5223,8 +5249,14 @@ function OverviewImportModal({
   const [message, setMessage] = useState("Choose an Excel, Google Sheets export, or CSV file to import.");
   const [result, setResult] = useState<OverviewImportResult | null>(null);
   const yearOptions = useMemo(() => schoolYearImportOptions(), []);
+  const selectedYearLocked = !canImportOverviewYear(schoolYear, lockedYears);
 
   async function startImport() {
+    if (selectedYearLocked) {
+      setStatus("error");
+      setMessage(`Import is disabled because ${schoolYear} is locked. Unlock the year before importing.`);
+      return;
+    }
     if (!file) {
       setStatus("error");
       setMessage("Choose a spreadsheet or CSV file before importing.");
@@ -5308,10 +5340,23 @@ function OverviewImportModal({
         <div className="import-controls">
           <label>
             Year
-            <select value={schoolYear} onChange={(event) => setSchoolYear(event.target.value)}>
+            <select
+              value={schoolYear}
+              onChange={(event) => {
+                const nextYear = event.target.value;
+                setSchoolYear(nextYear);
+                setResult(null);
+                setStatus("idle");
+                setMessage(
+                  canImportOverviewYear(nextYear, lockedYears)
+                    ? "Choose an Excel, Google Sheets export, or CSV file to import."
+                    : `Import is disabled because ${nextYear} is locked. Unlock the year before importing.`
+                );
+              }}
+            >
               {yearOptions.map((year) => (
                 <option key={year} value={year}>
-                  {year}
+                  {year}{lockedYears.includes(year) ? " (locked)" : ""}
                 </option>
               ))}
             </select>
@@ -5347,6 +5392,7 @@ function OverviewImportModal({
           <small>Supports .xlsx, .xls, .csv, and exported Google Sheets files.</small>
           <input
             accept=".xlsx,.xls,.csv,.ods,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,text/csv"
+            disabled={selectedYearLocked}
             type="file"
             onChange={(event) => chooseFile(event.target.files?.[0])}
           />
@@ -5394,7 +5440,7 @@ function OverviewImportModal({
               </button>
             </>
           ) : (
-            <button className="primary-action" disabled={status === "importing"} onClick={startImport} type="button">
+            <button className="primary-action" disabled={status === "importing" || selectedYearLocked} onClick={startImport} type="button">
               {status === "importing" ? "Importing..." : "Import"}
             </button>
           )}
@@ -6001,14 +6047,13 @@ function noteColumn(notes: StudentNote[], openNotes: (studentId: string) => void
     cellRenderer: (params: { data?: EntryRow }) => {
       const studentId = params.data?.id;
       const studentNotes = studentId ? notes.filter((note) => note.studentId === studentId) : [];
-      const viewableNotes = studentNotes.filter((note) => note.permission === "all" || note.permission === "admin_only");
       return (
         <button
-          className={viewableNotes.length ? "notes-icon has-notes" : "notes-icon"}
+          className={studentNotes.length ? "notes-icon has-notes" : "notes-icon"}
           onClick={() => studentId && openNotes(studentId)}
-          title={viewableNotes.length ? "View student notes" : "Add student note"}
+          title={studentNotes.length ? "View student notes" : "Add student note"}
           type="button"
-          aria-label={viewableNotes.length ? "View student notes" : "Add student note"}
+          aria-label={studentNotes.length ? "View student notes" : "Add student note"}
         >
           ✎
         </button>
@@ -6265,11 +6310,10 @@ const ScaleCodeCellEditor = forwardRef(function ScaleCodeCellEditor(
       inputRef.current?.select();
     },
     getValue() {
-      return validScaleCodeValue(draft, normalizedCodes);
+      return resolveScaleCodeEditorValue(draft, inputRef.current?.value, normalizedCodes).value;
     },
     getValidationErrors() {
-      if (!draft.trim() || validScaleCodeValue(draft, normalizedCodes)) return null;
-      return [`Choose one of: ${normalizedCodes.join(", ")}.`];
+      return resolveScaleCodeEditorValue(draft, inputRef.current?.value, normalizedCodes).validationErrors;
     }
   }), [draft, normalizedCodes]);
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildStudentSearchOptions,
+  canImportOverviewYear,
   deleteSchoolYearFromOverview,
   moveStudentToExistingHomeroom,
   parseOverviewStudentCount,
@@ -35,6 +36,13 @@ describe("parseOverviewStudentCount", () => {
     expect(parseOverviewStudentCount("1.5")).toBeNull();
     expect(parseOverviewStudentCount("0")).toBeNull();
     expect(parseOverviewStudentCount("41")).toBeNull();
+  });
+});
+
+describe("canImportOverviewYear", () => {
+  it("allows unlocked years and rejects locked years", () => {
+    expect(canImportOverviewYear("2026-2027", ["2025-2026"])).toBe(true);
+    expect(canImportOverviewYear("2026-2027", ["2026-2027"])).toBe(false);
   });
 });
 

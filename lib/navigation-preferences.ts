@@ -1,4 +1,5 @@
 import type { UserRole } from "@/lib/organization-auth";
+import { latestSchoolYear } from "@/lib/team-assignments";
 
 export const appViews = ["overview", "dashboard", "assessment", "report", "files", "profile"] as const;
 export const assessmentPageTabs = ["builder", "entry"] as const;
@@ -9,11 +10,12 @@ export type AssessmentPageTab = (typeof assessmentPageTabs)[number];
 export type ProfilePageTab = (typeof profilePageTabs)[number];
 
 export type NavigationPreference = {
-  version: 1;
+  version: 2;
   activeView: AppView;
   assessmentPageTab: AssessmentPageTab;
   profilePageTab: ProfilePageTab;
   selectedAssessmentId: string;
+  selectedSchoolYear: string;
 };
 
 type NavigationStorage = Pick<Storage, "getItem" | "setItem">;
@@ -27,7 +29,8 @@ export function navigationStorageKey(uid: string) {
 export function sanitizeNavigationPreference(
   value: unknown,
   role: UserRole,
-  availableAssessmentIds: readonly string[] = []
+  availableAssessmentIds: readonly string[] = [],
+  availableSchoolYears: readonly string[] = []
 ): NavigationPreference {
   const candidate = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const allowedViews: readonly AppView[] = role === "Admin"
@@ -49,24 +52,31 @@ export function sanitizeNavigationPreference(
     && availableAssessmentIds.includes(candidate.selectedAssessmentId)
     ? candidate.selectedAssessmentId
     : availableAssessmentIds[0] ?? "";
+  const newestSchoolYear = latestSchoolYear([...availableSchoolYears]);
+  const selectedSchoolYear = role === "Admin"
+    && typeof candidate.selectedSchoolYear === "string"
+    && availableSchoolYears.includes(candidate.selectedSchoolYear)
+    ? candidate.selectedSchoolYear
+    : newestSchoolYear;
 
-  return { version: 1, activeView, assessmentPageTab, profilePageTab, selectedAssessmentId };
+  return { version: 2, activeView, assessmentPageTab, profilePageTab, selectedAssessmentId, selectedSchoolYear };
 }
 
 export function readNavigationPreference(
   uid: string,
   role: UserRole,
   availableAssessmentIds: readonly string[] = [],
+  availableSchoolYears: readonly string[] = [],
   storage?: NavigationStorage
 ) {
   const availableStorage = storage ?? browserStorage();
-  if (!availableStorage) return sanitizeNavigationPreference(null, role, availableAssessmentIds);
+  if (!availableStorage) return sanitizeNavigationPreference(null, role, availableAssessmentIds, availableSchoolYears);
 
   try {
     const saved = availableStorage.getItem(navigationStorageKey(uid));
-    return sanitizeNavigationPreference(saved ? JSON.parse(saved) : null, role, availableAssessmentIds);
+    return sanitizeNavigationPreference(saved ? JSON.parse(saved) : null, role, availableAssessmentIds, availableSchoolYears);
   } catch {
-    return sanitizeNavigationPreference(null, role, availableAssessmentIds);
+    return sanitizeNavigationPreference(null, role, availableAssessmentIds, availableSchoolYears);
   }
 }
 

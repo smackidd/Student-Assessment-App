@@ -88,6 +88,10 @@ export function entryValue(
   section?: AssessmentSectionTemplate,
   context: AssessmentValueContext = {}
 ) {
+  if (isCalculatedAssessmentField(field) && hasScopedAssessmentContext(context)) {
+    const importedOverride = storedAssessmentValue(row, assessment, round, field, section, context);
+    if (typeof importedOverride !== "undefined") return importedOverride;
+  }
   if (assessment.id === "orf" && field.isCalculated) {
     return orfEntryValue(row, assessment, round, field, section, context);
   }
@@ -212,6 +216,10 @@ function calculationGroupKey(field: AssessmentFieldTemplate) {
 export function isEditableAssessmentField(_assessment: AssessmentTemplate, field: AssessmentFieldTemplate) {
   if (field.dataType === "file" || field.dataType === "calculated") return false;
   return !field.isCalculated;
+}
+
+export function isCalculatedAssessmentField(field: AssessmentFieldTemplate) {
+  return field.isCalculated || field.dataType === "calculated";
 }
 
 function orfEntryValue(
@@ -436,10 +444,11 @@ export function updateAssessmentRowFromTableEdit(
   if (!validation.valid) return row;
   const value = validation.value;
   const storedKey = assessmentValueKey(assessment, cell.round, cell.field, cell.section, context);
+  const assessmentValues = withoutCalculatedOverrides(row.assessmentValues, assessment, cell.round, context);
   const nextRow: OrfResultRow = {
     ...row,
     assessmentValues: {
-      ...row.assessmentValues,
+      ...assessmentValues,
       [storedKey]: value
     }
   };
@@ -471,6 +480,31 @@ export function updateAssessmentRowFromTableEdit(
   if (cell.round.id === "fall" && passageIndex === 2 && meaning === "epm") patch.septP3Epm = toNumber(value);
 
   return hydrateOrfRow(patch);
+}
+
+function withoutCalculatedOverrides(
+  values: OrfResultRow["assessmentValues"],
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  context: AssessmentValueContext
+) {
+  const nextValues = { ...values };
+  const sectionsForRound = sectionsForAssessmentRound(assessment, round);
+
+  assessment.fields
+    .filter((field) => isCalculatedAssessmentField(field) && (!field.roundIds?.length || field.roundIds.includes(round.id)))
+    .forEach((field) => {
+      const fieldSections = sectionsForField(assessment, round, field, sectionsForRound);
+      if (fieldSections.length) {
+        fieldSections.forEach((section) => {
+          assessmentValueKeys(assessment, round, field, section, context).forEach((key) => delete nextValues[key]);
+        });
+        return;
+      }
+      assessmentValueKeys(assessment, round, field, undefined, context).forEach((key) => delete nextValues[key]);
+    });
+
+  return nextValues;
 }
 
 function storedAssessmentNumber(
