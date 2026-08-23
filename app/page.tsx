@@ -5307,13 +5307,13 @@ function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) 
           <caption>{block.assessmentName} assessment results</caption>
           <thead>
             <tr>
-              <th colSpan={3} scope="row">Assessment Year</th>
+              <th colSpan={4} scope="row">Assessment Year</th>
               {yearGroups.map((group) => (
                 <th colSpan={group.span} key={group.key} scope="colgroup">{group.label}</th>
               ))}
             </tr>
             <tr>
-              <th colSpan={3} scope="row">Assessment Window</th>
+              <th colSpan={4} scope="row">Assessment Window</th>
               {windowGroups.map((group) => (
                 <th
                   colSpan={group.span}
@@ -5326,7 +5326,7 @@ function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) 
               ))}
             </tr>
             <tr>
-              <th colSpan={3} scope="row">Assessment Section</th>
+              <th colSpan={4} scope="row">Assessment Section</th>
               {sectionGroups.map((group) => (
                 <th
                   colSpan={group.span}
@@ -5342,6 +5342,7 @@ function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) 
               <th scope="col">Student</th>
               <th scope="col">Grade</th>
               <th scope="col">Homeroom</th>
+              <th scope="col">Year</th>
               {block.columns.map((column) => (
                 <th key={column.key} scope="col" style={{ backgroundColor: column.windowColor }}>
                   {column.field}
@@ -5356,6 +5357,7 @@ function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) 
                   <th scope="row">{row.student}</th>
                   <td>{row.grade || "-"}</td>
                   <td>{row.homeroom || "-"}</td>
+                  <td>{row.year}</td>
                   {block.columns.map((column) => (
                     <td key={column.key} style={{ backgroundColor: column.windowColor }}>
                       {row.values[column.key] || "-"}
@@ -5365,7 +5367,7 @@ function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) 
               ))
             ) : (
               <tr>
-                <td colSpan={Math.max(3, block.columns.length + 3)}>No assessment data matches the selected students and years.</td>
+                <td colSpan={Math.max(4, block.columns.length + 4)}>No assessment data matches the selected students and years.</td>
               </tr>
             )}
           </tbody>
@@ -5489,6 +5491,7 @@ function studentReportWorkbook(blocks: StudentReportBlock[]) {
     { wch: 24 },
     { wch: 10 },
     { wch: 14 },
+    { wch: 13 },
     ...Array.from({ length: dynamicColumnCount }, (_, index) => {
       const fieldWidth = Math.max(0, ...blocks.map((block) => block.columns[index]?.field.length ?? 0));
       return { wch: Math.max(12, Math.min(24, fieldWidth + 2)) };
@@ -5510,9 +5513,9 @@ function styleReportWorksheetBlock(worksheet: XLSX.WorkSheet, range: StudentRepo
 
       const isTitle = row === range.titleRow;
       const isHeader = row >= range.headerStartRow && row < range.dataStartRow;
-      const reportColumn = column >= 3 ? range.block.columns[column - 3] : undefined;
+      const reportColumn = column >= 4 ? range.block.columns[column - 4] : undefined;
       const windowColor = reportColumn?.windowColor.replace("#", "").toUpperCase();
-      const fillColor = isTitle ? "24465B" : windowColor || (isHeader && column < 3 ? "EFE7D5" : undefined);
+      const fillColor = isTitle ? "24465B" : windowColor || (isHeader && column < 4 ? "EFE7D5" : undefined);
       cell.s = {
         ...(cell.s ?? {}),
         alignment: {

@@ -223,25 +223,25 @@ export function buildStudentReportWorksheetLayout(blocks: StudentReportBlock[]):
 
   blocks.forEach((block, blockIndex) => {
     const titleRow = rows.length;
-    const columnCount = Math.max(3, block.columns.length + 3);
+    const columnCount = Math.max(4, block.columns.length + 4);
     rows.push([block.assessmentName, ...Array.from({ length: columnCount - 1 }, () => "")]);
     if (columnCount > 1) {
       merges.push({ startRow: titleRow, startColumn: 0, endRow: titleRow, endColumn: columnCount - 1 });
     }
 
     const headerStartRow = rows.length;
-    rows.push(["Assessment Year", "", "", ...block.columns.map((column) => column.year)]);
-    rows.push(["Assessment Window", "", "", ...block.columns.map((column) => column.window)]);
-    rows.push(["Assessment Section", "", "", ...block.columns.map((column) => column.section || "General")]);
-    rows.push(["Student", "Grade", "Homeroom", ...block.columns.map((column) => column.field)]);
+    rows.push(["Assessment Year", "", "", "", ...block.columns.map((column) => column.year)]);
+    rows.push(["Assessment Window", "", "", "", ...block.columns.map((column) => column.window)]);
+    rows.push(["Assessment Section", "", "", "", ...block.columns.map((column) => column.section || "General")]);
+    rows.push(["Student", "Grade", "Homeroom", "Year", ...block.columns.map((column) => column.field)]);
 
     merges.push(
-      { startRow: headerStartRow, startColumn: 0, endRow: headerStartRow, endColumn: 2 },
-      { startRow: headerStartRow + 1, startColumn: 0, endRow: headerStartRow + 1, endColumn: 2 },
-      { startRow: headerStartRow + 2, startColumn: 0, endRow: headerStartRow + 2, endColumn: 2 }
+      { startRow: headerStartRow, startColumn: 0, endRow: headerStartRow, endColumn: 3 },
+      { startRow: headerStartRow + 1, startColumn: 0, endRow: headerStartRow + 1, endColumn: 3 },
+      { startRow: headerStartRow + 2, startColumn: 0, endRow: headerStartRow + 2, endColumn: 3 }
     );
     (["year", "window", "section"] as const).forEach((level, levelIndex) => {
-      let startColumn = 3;
+      let startColumn = 4;
       studentReportHeaderGroups(block.columns, level).forEach((group) => {
         if (group.span > 1) {
           merges.push({
@@ -261,6 +261,7 @@ export function buildStudentReportWorksheetLayout(blocks: StudentReportBlock[]):
         row.student,
         row.grade,
         row.homeroom,
+        row.year,
         ...block.columns.map((column) => row.values[column.key] ?? "")
       ]);
     });

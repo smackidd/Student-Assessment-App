@@ -288,11 +288,12 @@ describe("student report worksheet layout", () => {
 
     expect(layout.blocks).toHaveLength(2);
     expect(layout.rows[0][0]).toBe("Reading");
-    expect(layout.rows[1].slice(0, 4)).toEqual(["Assessment Year", "", "", "2026-2027"]);
-    expect(layout.rows[5].slice(0, 4)).toEqual(["Alex Smith", "3", "3A", "42"]);
+    expect(layout.rows[1].slice(0, 5)).toEqual(["Assessment Year", "", "", "", "2026-2027"]);
+    expect(layout.rows[4].slice(0, 5)).toEqual(["Student", "Grade", "Homeroom", "Year", "Score"]);
+    expect(layout.rows[5].slice(0, 5)).toEqual(["Alex Smith", "3", "3A", "2026-2027", "42"]);
     expect(layout.rows[6]).toEqual([]);
     expect(layout.rows[7][0]).toBe("Writing");
-    expect(layout.rows[12].slice(0, 4)).toEqual(["Alex Smith", "3", "3A", "Strong"]);
+    expect(layout.rows[12].slice(0, 5)).toEqual(["Alex Smith", "3", "3A", "2026-2027", "Strong"]);
     expect(layout.blocks.map((block) => block.titleRow)).toEqual([0, 7]);
   });
 
@@ -309,9 +310,9 @@ describe("student report worksheet layout", () => {
     ]);
     const layout = buildStudentReportWorksheetLayout([block]);
 
-    expect(layout.merges).toContainEqual({ startRow: 0, startColumn: 0, endRow: 0, endColumn: 4 });
-    expect(layout.merges).toContainEqual({ startRow: 1, startColumn: 3, endRow: 1, endColumn: 4 });
-    expect(layout.merges).toContainEqual({ startRow: 2, startColumn: 3, endRow: 2, endColumn: 4 });
-    expect(layout.merges).toContainEqual({ startRow: 3, startColumn: 3, endRow: 3, endColumn: 4 });
+    expect(layout.merges).toContainEqual({ startRow: 0, startColumn: 0, endRow: 0, endColumn: 5 });
+    expect(layout.merges).toContainEqual({ startRow: 1, startColumn: 4, endRow: 1, endColumn: 5 });
+    expect(layout.merges).toContainEqual({ startRow: 2, startColumn: 4, endRow: 2, endColumn: 5 });
+    expect(layout.merges).toContainEqual({ startRow: 3, startColumn: 4, endRow: 3, endColumn: 5 });
   });
 });
