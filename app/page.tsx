@@ -12,9 +12,15 @@ import {
   type ICellEditorParams
 } from "ag-grid-community";
 import {
+  Bar,
+  BarChart,
+  Cell,
   CartesianGrid,
+  Legend,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -37,6 +43,7 @@ import {
   assessmentTemplates,
   emptyCustomTemplate,
   normalizeAssessmentTemplates,
+  type AssessmentDefinitionSnapshot,
   type AssessmentDataType,
   type AssessmentFieldTemplate,
   type AssessmentRoundTemplate,
@@ -302,6 +309,24 @@ export default function StudentEvaluationApp() {
     () => filterStudentNotesForRole(notes, currentUserRole),
     [currentUserRole, notes]
   );
+  const [builderDefinitionYearsByAssessment, setBuilderDefinitionYearsByAssessment] = useState<Record<string, string[]>>({});
+  const builderDefinitionYears = builderDefinitionYearsByAssessment[selectedId] ?? schoolYears;
+  const builderSelected = useMemo(
+    () => assessmentTemplateForDefinitionScope(selected, builderDefinitionYears, schoolYears),
+    [builderDefinitionYears, schoolYears, selected]
+  );
+  const selectedTableTemplate = useMemo(
+    () => assessmentTemplateForYear(selected, selectedOverviewYear),
+    [selected, selectedOverviewYear]
+  );
+  const savedDefinitionYears = useMemo(() => {
+    const savedTemplate = lastSavedWorkspaceState?.templates.find((template) => template.id === selectedId);
+    return Object.keys(savedTemplate?.yearDefinitions ?? {});
+  }, [lastSavedWorkspaceState, selectedId]);
+  const overviewTemplatesForYear = useMemo(
+    () => templates.map((template) => assessmentTemplateForYear(template, selectedOverviewYear)),
+    [selectedOverviewYear, templates]
+  );
   const activeOverviewRows = useMemo(
     () =>
       overviewPlacements
@@ -353,8 +378,8 @@ export default function StudentEvaluationApp() {
       ).sort(),
     [overviewPlacements, selectedOverviewGrade, selectedOverviewYear]
   );
-  const lockedFieldCount = selected.fields.filter((field) => field.isCalculated).length;
-  const evaluatorFieldCount = selected.fields.filter((field) => field.visibility === "evaluators").length;
+  const lockedFieldCount = builderSelected.fields.filter((field) => field.isCalculated).length;
+  const evaluatorFieldCount = selectedTableTemplate.fields.filter((field) => field.visibility === "evaluators").length;
 
   useEffect(() => {
     const auth = getAuth(firebaseApp);
@@ -792,13 +817,14 @@ export default function StudentEvaluationApp() {
     }
   }
 
-  async function saveTablesToFirebase() {
+  async function saveTablesToFirebase(options?: { templatesOverride?: AssessmentTemplate[] }) {
     setSaveStatus("saving");
     setSaveMessage("Saving table changes to Firebase...");
     let workspaceSavedWithPendingSync: SavedWorkspaceState | null = null;
     try {
       let rowsForSave = orfRows;
       let placementsForSave = overviewPlacements;
+      const templatesForSave = options?.templatesOverride ?? templates;
 
       if (activeView === "overview") {
         const savedState = lastSavedWorkspaceState;
@@ -840,7 +866,7 @@ export default function StudentEvaluationApp() {
       const pendingWorkspaceState: SavedWorkspaceState = {
         rows: rowsForSave,
         placements: placementsForSave,
-        templates,
+        templates: templatesForSave,
         schoolYears,
         lockedOverviewYears,
         auditEvents,
@@ -867,6 +893,7 @@ export default function StudentEvaluationApp() {
       if (activeView === "profile" && authUser && userProfile.name && userProfile.name !== authUser.displayName) {
         await updateProfile(authUser, { displayName: userProfile.name });
       }
+      setTemplates(templatesForSave);
       setOrfRows(workspaceState.rows);
       setOverviewPlacements(workspaceState.placements);
       setDatabaseStudentOptions(buildStudentIdentityOptions(workspaceState.rows, workspaceState.placements));
@@ -903,9 +930,18 @@ export default function StudentEvaluationApp() {
 
   function updateSelected(patch: Partial<AssessmentTemplate>) {
     setTemplates((current) =>
-      current.map((template) => (template.id === selected.id ? { ...template, ...patch } : template))
+      current.map((template) =>
+        template.id === selectedId ? updateAssessmentTemplateForYears(template, builderDefinitionYears, schoolYears, patch) : template
+      )
     );
     markUnsaved("Assessment Builder changed. Save to update Firebase.");
+  }
+
+  async function saveAssessmentBuilder(definitionYears: string[]) {
+    const templatesForSave = templates.map((template) =>
+      template.id === selected.id ? { ...template, definitionYears } : template
+    );
+    await saveTablesToFirebase({ templatesOverride: templatesForSave });
   }
 
   function addCustomAssessment() {
@@ -938,7 +974,7 @@ export default function StudentEvaluationApp() {
       .replace(/^_|_$/g, "");
 
     const nextField: AssessmentFieldTemplate = {
-      id: `${selected.id}-${slug}-${selected.fields.length + 1}`,
+      id: `${selected.id}-${slug}-${builderSelected.fields.length + 1}`,
       name,
       slug,
       dataType: draftField.isCalculated ? "calculated" : draftField.dataType,
@@ -952,11 +988,11 @@ export default function StudentEvaluationApp() {
       visibility: "evaluators"
     };
 
-    updateSelected({ fields: [...selected.fields, nextField] });
+    updateSelected({ fields: [...builderSelected.fields, nextField] });
     recordAudit(
       draftField.isCalculated ? "Added formula field" : "Added field",
       "Assessment field",
-      `${selected.name} / ${name}`,
+      `${builderSelected.name} / ${name}`,
       `Added ${nextField.dataType} field.`
     );
     setDraftField({
@@ -971,53 +1007,53 @@ export default function StudentEvaluationApp() {
   }
 
   function removeField(fieldId: string) {
-    const removedField = selected.fields.find((field) => field.id === fieldId);
-    updateSelected({ fields: selected.fields.filter((field) => field.id !== fieldId) });
+    const removedField = builderSelected.fields.find((field) => field.id === fieldId);
+    updateSelected({ fields: builderSelected.fields.filter((field) => field.id !== fieldId) });
     if (removedField) {
       recordAudit(
         "Removed field",
         "Assessment field",
-        `${selected.name} / ${removedField.name}`,
+        `${builderSelected.name} / ${removedField.name}`,
         "Removed a configurable assessment field from the active definition."
       );
     }
   }
 
   function addRound() {
-    const roundNumber = selected.rounds.length + 1;
+    const roundNumber = builderSelected.rounds.length + 1;
     const nextRound: AssessmentRoundTemplate = {
       id: `round-${Date.now()}`,
       label: `Round ${roundNumber}`,
       month: "Custom",
       color: pastelRoundColors[(roundNumber - 1) % pastelRoundColors.length]
     };
-    updateSelected({ rounds: [...selected.rounds, nextRound] });
-    recordAudit("Added round", "Assessment round", `${selected.name} / ${nextRound.label}`, "Added a new assessment round.");
+    updateSelected({ rounds: [...builderSelected.rounds, nextRound] });
+    recordAudit("Added round", "Assessment round", `${builderSelected.name} / ${nextRound.label}`, "Added a new assessment round.");
   }
 
   function updateRound(roundId: string, patch: Partial<AssessmentRoundTemplate>) {
-    const round = selected.rounds.find((item) => item.id === roundId);
+    const round = builderSelected.rounds.find((item) => item.id === roundId);
     updateSelected({
-      rounds: selected.rounds.map((item) => (item.id === roundId ? { ...item, ...patch } : item))
+      rounds: builderSelected.rounds.map((item) => (item.id === roundId ? { ...item, ...patch } : item))
     });
     if (round && patch.label) {
       recordAudit(
         "Edited round",
         "Assessment round",
-        `${selected.name} / ${patch.label}`,
+        `${builderSelected.name} / ${patch.label}`,
         `Changed round title from ${round.label} to ${patch.label}.`
       );
     }
   }
 
   function removeRound(roundId: string) {
-    const removedRound = selected.rounds.find((round) => round.id === roundId);
-    updateSelected({ rounds: selected.rounds.filter((round) => round.id !== roundId) });
+    const removedRound = builderSelected.rounds.find((round) => round.id === roundId);
+    updateSelected({ rounds: builderSelected.rounds.filter((round) => round.id !== roundId) });
     if (removedRound) {
       recordAudit(
         "Removed round",
         "Assessment round",
-        `${selected.name} / ${removedRound.label}`,
+        `${builderSelected.name} / ${removedRound.label}`,
         "Removed an assessment round."
       );
     }
@@ -1026,30 +1062,30 @@ export default function StudentEvaluationApp() {
   function addSection() {
     const nextSection: AssessmentSectionTemplate = {
       id: `section-${Date.now()}`,
-      name: `Section ${(selected.sections?.length ?? 0) + 1}`,
-      roundIds: selected.rounds[0] ? [selected.rounds[0].id] : []
+      name: `Section ${(builderSelected.sections?.length ?? 0) + 1}`,
+      roundIds: builderSelected.rounds[0] ? [builderSelected.rounds[0].id] : []
     };
-    updateSelected({ sections: [...(selected.sections ?? []), nextSection] });
-    recordAudit("Added section", "Assessment section", `${selected.name} / ${nextSection.name}`, "Added an optional assessment window section.");
+    updateSelected({ sections: [...(builderSelected.sections ?? []), nextSection] });
+    recordAudit("Added section", "Assessment section", `${builderSelected.name} / ${nextSection.name}`, "Added an optional assessment window section.");
   }
 
   function updateSection(sectionId: string, patch: Partial<AssessmentSectionTemplate>) {
     updateSelected({
-      sections: (selected.sections ?? []).map((section) => (section.id === sectionId ? { ...section, ...patch } : section))
+      sections: (builderSelected.sections ?? []).map((section) => (section.id === sectionId ? { ...section, ...patch } : section))
     });
   }
 
   function removeSection(sectionId: string) {
-    const removed = selected.sections?.find((section) => section.id === sectionId);
+    const removed = builderSelected.sections?.find((section) => section.id === sectionId);
     updateSelected({
-      sections: (selected.sections ?? []).filter((section) => section.id !== sectionId),
-      fields: selected.fields.map((field) => ({
+      sections: (builderSelected.sections ?? []).filter((section) => section.id !== sectionId),
+      fields: builderSelected.fields.map((field) => ({
         ...field,
         sectionIds: field.sectionIds?.filter((id) => id !== sectionId)
       }))
     });
     if (removed) {
-      recordAudit("Removed section", "Assessment section", `${selected.name} / ${removed.name}`, "Removed an optional assessment section.");
+      recordAudit("Removed section", "Assessment section", `${builderSelected.name} / ${removed.name}`, "Removed an optional assessment section.");
     }
   }
 
@@ -1705,7 +1741,7 @@ export default function StudentEvaluationApp() {
 
             {assessmentPageTab === "builder" ? (
               <AssessmentBuilder
-                selected={selected}
+                selected={builderSelected}
                 lockedFieldCount={lockedFieldCount}
                 draftField={draftField}
                 setDraftField={setDraftField}
@@ -1718,15 +1754,21 @@ export default function StudentEvaluationApp() {
                 addSection={addSection}
                 updateSection={updateSection}
                 removeSection={removeSection}
+                schoolYears={schoolYears}
+                definitionYears={builderDefinitionYears}
+                setDefinitionYears={(years) =>
+                  setBuilderDefinitionYearsByAssessment((current) => ({ ...current, [selectedId]: years }))
+                }
+                savedDefinitionYears={savedDefinitionYears}
                 saveStatus={saveStatus}
                 saveMessage={saveMessage}
-                onSave={saveTablesToFirebase}
+                onSave={saveAssessmentBuilder}
               />
             ) : (
               <InlineEntryTable
                 rows={activeOverviewRows}
                 setRows={setOrfRows}
-                selected={selected}
+                selected={selectedTableTemplate}
                 notes={authorizedNotes}
                 schoolYears={schoolYears}
                 selectedYear={selectedOverviewYear}
@@ -1748,7 +1790,7 @@ export default function StudentEvaluationApp() {
         ) : activeView === "overview" ? (
           <VpOverview
             rows={activeOverviewRows}
-            templates={templates}
+            templates={overviewTemplatesForYear}
             notes={authorizedNotes}
             schoolYears={schoolYears}
             selectedYear={selectedOverviewYear}
@@ -2172,6 +2214,100 @@ function friendlyPasswordError(error: unknown) {
   return message || "Password change failed.";
 }
 
+function assessmentDefinitionSnapshot(template: AssessmentTemplate): AssessmentDefinitionSnapshot {
+  return {
+    name: template.name,
+    description: template.description,
+    gradeScope: template.gradeScope,
+    rounds: template.rounds.map((round) => ({ ...round })),
+    sections: (template.sections ?? []).map((section) => ({ ...section, roundIds: [...section.roundIds] })),
+    fields: template.fields.map((field) => ({
+      ...field,
+      roundIds: field.roundIds ? [...field.roundIds] : undefined,
+      sectionIds: field.sectionIds ? [...field.sectionIds] : undefined
+    }))
+  };
+}
+
+function assessmentTemplateFromSnapshot(
+  template: AssessmentTemplate,
+  snapshot: AssessmentDefinitionSnapshot,
+  definitionYears = template.definitionYears
+): AssessmentTemplate {
+  return {
+    ...template,
+    ...snapshot,
+    definitionYears,
+    yearDefinitions: template.yearDefinitions,
+    rounds: snapshot.rounds.map((round) => ({ ...round })),
+    sections: (snapshot.sections ?? []).map((section) => ({ ...section, roundIds: [...section.roundIds] })),
+    fields: snapshot.fields.map((field) => ({
+      ...field,
+      roundIds: field.roundIds ? [...field.roundIds] : undefined,
+      sectionIds: field.sectionIds ? [...field.sectionIds] : undefined
+    }))
+  };
+}
+
+function assessmentTemplateForYear(template: AssessmentTemplate, schoolYear: string): AssessmentTemplate {
+  const snapshot = template.yearDefinitions?.[schoolYear];
+  return snapshot ? assessmentTemplateFromSnapshot(template, snapshot, [schoolYear]) : { ...template, definitionYears: template.definitionYears };
+}
+
+function assessmentTemplateForDefinitionScope(
+  template: AssessmentTemplate,
+  definitionYears: string[],
+  schoolYears: string[]
+): AssessmentTemplate {
+  const fallbackYear = definitionYears[0] ?? schoolYears[0] ?? "";
+  const scoped = definitionYears.length === schoolYears.length ? template : assessmentTemplateForYear(template, fallbackYear);
+  return { ...scoped, definitionYears, yearDefinitions: template.yearDefinitions };
+}
+
+function updateAssessmentTemplateForYears(
+  template: AssessmentTemplate,
+  definitionYears: string[],
+  schoolYears: string[],
+  patch: Partial<AssessmentTemplate>
+): AssessmentTemplate {
+  const scopedYears = definitionYears.length ? definitionYears : schoolYears;
+
+  if (scopedYears.length === schoolYears.length) {
+    const updated = { ...template, ...patch, definitionYears: schoolYears };
+    const snapshot = assessmentDefinitionSnapshot(updated);
+    return {
+      ...updated,
+      yearDefinitions: Object.fromEntries(schoolYears.map((year) => [year, snapshot]))
+    };
+  }
+
+  const yearDefinitions = { ...(template.yearDefinitions ?? {}) };
+  scopedYears.forEach((year) => {
+    const currentSnapshot = assessmentDefinitionSnapshot(assessmentTemplateForYear(template, year));
+    yearDefinitions[year] = {
+      ...currentSnapshot,
+      ...definitionPatchSnapshot(patch)
+    };
+  });
+
+  return {
+    ...template,
+    definitionYears: scopedYears,
+    yearDefinitions
+  };
+}
+
+function definitionPatchSnapshot(patch: Partial<AssessmentTemplate>): Partial<AssessmentDefinitionSnapshot> {
+  const snapshotPatch: Partial<AssessmentDefinitionSnapshot> = {};
+  if (typeof patch.name !== "undefined") snapshotPatch.name = patch.name;
+  if (typeof patch.description !== "undefined") snapshotPatch.description = patch.description;
+  if (typeof patch.gradeScope !== "undefined") snapshotPatch.gradeScope = patch.gradeScope;
+  if (typeof patch.rounds !== "undefined") snapshotPatch.rounds = patch.rounds;
+  if (typeof patch.sections !== "undefined") snapshotPatch.sections = patch.sections;
+  if (typeof patch.fields !== "undefined") snapshotPatch.fields = patch.fields;
+  return snapshotPatch;
+}
+
 function AssessmentBuilder({
   selected,
   lockedFieldCount,
@@ -2186,6 +2322,10 @@ function AssessmentBuilder({
   addSection,
   updateSection,
   removeSection,
+  schoolYears,
+  definitionYears,
+  setDefinitionYears,
+  savedDefinitionYears,
   saveStatus,
   saveMessage,
   onSave
@@ -2221,14 +2361,20 @@ function AssessmentBuilder({
   addSection: () => void;
   updateSection: (sectionId: string, patch: Partial<AssessmentSectionTemplate>) => void;
   removeSection: (sectionId: string) => void;
+  schoolYears: string[];
+  definitionYears: string[];
+  setDefinitionYears: (years: string[]) => void;
+  savedDefinitionYears: string[];
   saveStatus: SaveStatus;
   saveMessage: string;
-  onSave: () => Promise<void>;
+  onSave: (definitionYears: string[]) => Promise<void>;
 }) {
   const [colorPickerRoundId, setColorPickerRoundId] = useState<string | null>(null);
   const [addFieldOpen, setAddFieldOpen] = useState(false);
   const [editingFieldId, setEditingFieldId] = useState<string | null>(null);
   const [sectionWindowPickerId, setSectionWindowPickerId] = useState<string | null>(null);
+  const [definitionYearPickerOpen, setDefinitionYearPickerOpen] = useState(false);
+  const [overwriteYears, setOverwriteYears] = useState<string[] | null>(null);
   const colorPickerRound = colorPickerRoundId
     ? selected.rounds.find((round) => round.id === colorPickerRoundId) ?? null
     : null;
@@ -2236,6 +2382,37 @@ function AssessmentBuilder({
   const sectionWindowPicker = sectionWindowPickerId
     ? (selected.sections ?? []).find((section) => section.id === sectionWindowPickerId) ?? null
     : null;
+  const definitionYearLabel =
+    definitionYears.length === schoolYears.length
+      ? "All years"
+      : definitionYears.length === 1
+        ? definitionYears[0]
+        : definitionYears.length
+          ? `${definitionYears.length} years`
+          : "No years";
+
+  useEffect(() => {
+    setDefinitionYearPickerOpen(false);
+    setOverwriteYears(null);
+  }, [selected.id]);
+
+  function toggleDefinitionYear(year: string) {
+    setDefinitionYears(definitionYears.includes(year) ? definitionYears.filter((item) => item !== year) : [...definitionYears, year]);
+  }
+
+  async function saveDefinition() {
+    const alreadyDefinedYears = definitionYears.filter((year) => savedDefinitionYears.includes(year));
+    if (alreadyDefinedYears.length) {
+      setOverwriteYears(alreadyDefinedYears);
+      return;
+    }
+    await onSave(definitionYears);
+  }
+
+  async function confirmDefinitionOverwrite() {
+    await onSave(definitionYears);
+    setOverwriteYears(null);
+  }
 
   function openAddField() {
     setDraftField((field) => ({ ...field, selectedRoundIds: [], selectedSectionIds: [] }));
@@ -2294,7 +2471,7 @@ function AssessmentBuilder({
           <h2>Assessment Builder changes</h2>
           <p>Save assessment names, windows, colors, fields, formulas, and starter data to Firebase.</p>
         </div>
-        <SaveBar status={saveStatus} message={saveMessage} onSave={onSave} compact />
+        <SaveBar status={saveStatus} message={saveMessage} onSave={saveDefinition} compact />
       </div>
 
       <div className="panel details-panel">
@@ -2312,6 +2489,34 @@ function AssessmentBuilder({
           Grade scope
           <input value={selected.gradeScope} onChange={(event) => updateSelected({ gradeScope: event.target.value })} />
         </label>
+
+        <div className="multi-picker">
+          <span>Definition years</span>
+          <button className="picker-field-button" onClick={() => setDefinitionYearPickerOpen((open) => !open)} type="button">
+            <span>{definitionYearLabel}</span>
+            <span className="dropdown-arrow" aria-hidden="true" />
+          </button>
+          {definitionYearPickerOpen ? (
+            <div className="multi-picker-menu">
+              <label className="checkbox-row select-all-row">
+                <input
+                  checked={definitionYears.length === schoolYears.length}
+                  onChange={() => {
+                    setDefinitionYears(definitionYears.length === schoolYears.length ? [] : schoolYears);
+                  }}
+                  type="checkbox"
+                />
+                Select All
+              </label>
+              {schoolYears.map((year) => (
+                <label className="checkbox-row" key={year}>
+                  <input checked={definitionYears.includes(year)} onChange={() => toggleDefinitionYear(year)} type="checkbox" />
+                  {year}
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
 
         <label>
           Description
@@ -2507,6 +2712,32 @@ function AssessmentBuilder({
           onChange={(ids) => updateSection(sectionWindowPicker.id, { roundIds: ids })}
           onClose={() => setSectionWindowPickerId(null)}
         />
+      ) : null}
+
+      {overwriteYears ? (
+        <div className="modal-backdrop nested-modal" role="dialog" aria-modal="true" aria-label="Overwrite assessment definition years">
+          <section className="notes-modal panel">
+            <div className="modal-top">
+              <div>
+                <p className="eyebrow">Definition Years</p>
+                <h2>Overwrite existing years?</h2>
+              </div>
+              <button className="small-action ghost" onClick={() => setOverwriteYears(null)} type="button">
+                Cancel
+              </button>
+            </div>
+            <p>These years already have a definition assigned for {selected.name}:</p>
+            <div className="option-checks">
+              {overwriteYears.map((year) => (
+                <span className="status-badge" key={year}>{year}</span>
+              ))}
+            </div>
+            <p>Overwrite the assessment definition for these years with the current Definition, Windows, Sections, and Fields?</p>
+            <button className="primary-action" onClick={confirmDefinitionOverwrite} type="button">
+              Overwrite selected years
+            </button>
+          </section>
+        </div>
       ) : null}
     </section>
   );
@@ -3504,17 +3735,55 @@ function Dashboard({
   templates: AssessmentTemplate[];
   schoolYears: string[];
 }) {
+  const [chartType, setChartType] = useState<"progression" | "comparison" | "average">("progression");
   const [homeroom, setHomeroom] = useState("all");
   const [studentKey, setStudentKey] = useState("all");
-  const [assessmentId, setAssessmentId] = useState(templates[0]?.id ?? "all");
-  const selectedAssessment = templates.find((template) => template.id === assessmentId) ?? templates[0];
-  const [fieldId, setFieldId] = useState(selectedAssessment?.fields[0]?.id ?? "");
+  const [assessmentIds, setAssessmentIds] = useState<string[]>(templates[0] ? [templates[0].id] : []);
+  const selectedAssessments = useMemo(
+    () => templates.filter((template) => assessmentIds.includes(template.id)),
+    [assessmentIds, templates]
+  );
+  const selectedAssessment = selectedAssessments[0] ?? templates[0];
+  const [fieldKeys, setFieldKeys] = useState<string[]>(templates[0]?.fields[0] ? [`${templates[0].id}::${templates[0].fields[0].id}`] : []);
   const [sectionId, setSectionId] = useState("all");
   const [roundId, setRoundId] = useState("all");
   const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
+  const [assessmentPickerOpen, setAssessmentPickerOpen] = useState(false);
+  const [fieldPickerOpen, setFieldPickerOpen] = useState(false);
   const [yearPickerOpen, setYearPickerOpen] = useState(false);
   const [progressionFullScreen, setProgressionFullScreen] = useState(false);
   const allYearsSelected = selectedYears.length === schoolYears.length;
+  const allAssessmentsSelected = assessmentIds.length === templates.length;
+  const fieldOptions = useMemo(
+    () =>
+      selectedAssessments.flatMap((assessment) =>
+        assessment.fields.map((field) => ({
+          id: `${assessment.id}::${field.id}`,
+          label: `${assessment.name} / ${field.name}`,
+          assessment,
+          field
+        }))
+      ),
+    [selectedAssessments]
+  );
+  const selectedFieldRefs = useMemo(
+    () => fieldOptions.filter((option) => fieldKeys.includes(option.id)),
+    [fieldKeys, fieldOptions]
+  );
+  const selectedField = selectedFieldRefs[0]?.field;
+  const assessmentPickerLabel = allAssessmentsSelected
+    ? "All assessments"
+    : assessmentIds.length === 1
+      ? templates.find((template) => template.id === assessmentIds[0])?.name ?? "1 assessment"
+      : assessmentIds.length
+        ? `${assessmentIds.length} assessments`
+        : "No assessments";
+  const fieldPickerLabel =
+    selectedFieldRefs.length === 1
+      ? selectedFieldRefs[0].field.name
+      : selectedFieldRefs.length
+        ? `${selectedFieldRefs.length} fields`
+        : "No fields";
   const yearPickerLabel = allYearsSelected
     ? "All Years"
     : selectedYears.length === 1
@@ -3552,11 +3821,18 @@ function Dashboard({
   }, [dashboardPlacements, rowsById]);
 
   useEffect(() => {
-    if (!selectedAssessment) return;
-    if (!selectedAssessment.fields.some((field) => field.id === fieldId)) {
-      setFieldId(selectedAssessment.fields[0]?.id ?? "");
-    }
-  }, [fieldId, selectedAssessment]);
+    setAssessmentIds((current) => {
+      const valid = current.filter((id) => templates.some((template) => template.id === id));
+      return valid.length ? valid : templates[0] ? [templates[0].id] : [];
+    });
+  }, [templates]);
+
+  useEffect(() => {
+    setFieldKeys((current) => {
+      const valid = current.filter((key) => fieldOptions.some((option) => option.id === key));
+      return valid.length ? valid : fieldOptions[0] ? [fieldOptions[0].id] : [];
+    });
+  }, [fieldOptions]);
 
   useEffect(() => {
     if (studentKey !== "all" && !availableStudents.some((row) => dashboardStudentKey(row) === studentKey)) {
@@ -3573,22 +3849,23 @@ function Dashboard({
       }),
     [dashboardPlacements, rowsById, studentKey]
   );
-  const selectedField = useMemo(
-    () => selectedAssessment?.fields.find((field) => field.id === fieldId) ?? selectedAssessment?.fields[0],
-    [fieldId, selectedAssessment]
-  );
   const selectedScaleCodes = useMemo(() => (selectedField ? scaleCodesForField(selectedField) : []), [selectedField]);
-  const usesScaleYAxis = selectedScaleCodes.length > 0 && (selectedField?.dataType === "letter" || selectedField?.dataType === "text");
+  const usesScaleYAxis =
+    selectedFieldRefs.length === 1 &&
+    selectedScaleCodes.length > 0 &&
+    (selectedField?.dataType === "letter" || selectedField?.dataType === "text");
   const availableSections = useMemo(() => {
-    if (!selectedAssessment || !selectedField) return [];
+    if (!selectedFieldRefs.length) return [];
     const sections = new Map<string, AssessmentSectionTemplate>();
-    selectedAssessment.rounds.forEach((round) => {
-      dashboardSectionsForField(selectedAssessment, round, selectedField).forEach((section) => {
-        sections.set(section.id, section);
+    selectedFieldRefs.forEach(({ assessment, field }) => {
+      assessment.rounds.forEach((round) => {
+        dashboardSectionsForField(assessment, round, field).forEach((section) => {
+          sections.set(section.id, section);
+        });
       });
     });
     return Array.from(sections.values());
-  }, [selectedAssessment, selectedField]);
+  }, [selectedFieldRefs]);
 
   useEffect(() => {
     if (sectionId !== "all" && !availableSections.some((section) => section.id === sectionId)) {
@@ -3597,57 +3874,94 @@ function Dashboard({
   }, [availableSections, sectionId]);
 
   useEffect(() => {
-    if (roundId !== "all" && !selectedAssessment?.rounds.some((round) => round.id === roundId)) {
+    if (roundId !== "all" && !selectedAssessments.some((assessment) => assessment.rounds.some((round) => round.id === roundId))) {
       setRoundId("all");
     }
-  }, [roundId, selectedAssessment]);
+  }, [roundId, selectedAssessments]);
 
   const chartData = useMemo(() => {
-    if (!selectedAssessment) return [];
+    if (!selectedFieldRefs.length) return [];
     return selectedYears
       .slice()
       .sort(compareSchoolYears)
       .flatMap((year) => {
-        const chartPoints = selectedAssessment.rounds.reduce<
-          Array<{ round: AssessmentRoundTemplate; section?: AssessmentSectionTemplate; sectionIndex: number; sectionCount: number }>
-        >((points, round) => {
-          if (roundId !== "all" && round.id !== roundId) return points;
-          const sections = dashboardSectionsForField(selectedAssessment, round, selectedField);
-          if (sections.length) {
-            const filteredSections = sectionId === "all" ? sections : sections.filter((section) => section.id === sectionId);
-            filteredSections.forEach((section, sectionIndex) =>
-              points.push({ round, section, sectionIndex, sectionCount: filteredSections.length })
-            );
-          } else {
-            if (sectionId === "all") {
-              points.push({ round, sectionIndex: 0, sectionCount: 0 });
-            }
+        const points = new Map<
+          string,
+          {
+            axisKey: string;
+            year: string;
+            window: string;
+            section: string;
+            color: string;
+            [key: string]: string | number | null;
           }
-          return points;
-        }, []);
+        >();
 
-        return chartPoints.map(({ round, section, sectionIndex, sectionCount }, pointIndex) => {
-          const showYearLabel = pointIndex === Math.floor(chartPoints.length / 2);
-          const showWindowLabel = !section || sectionIndex === Math.floor(sectionCount / 2);
-          return {
-            axisKey: `${section?.name ?? ""}|${showWindowLabel ? windowIndicatorForRound(round) : ""}|${showYearLabel ? year : ""}|${sectionIndex % 2}|${year}-${round.id}-${section?.id ?? "window"}`,
-            year,
-            window: round.label,
-            section: section?.name ?? "",
-            color: round.color ?? "#101820",
-            averageScore: averageDashboardFieldValue(
-              filteredPlacements,
-              rowsById,
-              selectedAssessment,
-              round,
-              selectedField,
-              year,
-              section
-            )
-          };
+        selectedFieldRefs.forEach(({ id, assessment, field }) => {
+          const chartPoints = assessment.rounds.reduce<
+            Array<{ round: AssessmentRoundTemplate; section?: AssessmentSectionTemplate; sectionIndex: number; sectionCount: number }>
+          >((roundPoints, round) => {
+            if (roundId !== "all" && round.id !== roundId) return roundPoints;
+            const sections = dashboardSectionsForField(assessment, round, field);
+            if (sections.length) {
+              const filteredSections = sectionId === "all" ? sections : sections.filter((section) => section.id === sectionId);
+              filteredSections.forEach((section, sectionIndex) =>
+                roundPoints.push({ round, section, sectionIndex, sectionCount: filteredSections.length })
+              );
+            } else if (sectionId === "all") {
+              roundPoints.push({ round, sectionIndex: 0, sectionCount: 0 });
+            }
+            return roundPoints;
+          }, []);
+
+          chartPoints.forEach(({ round, section, sectionIndex, sectionCount }, pointIndex) => {
+            const key = `${assessment.id}-${year}-${round.id}-${section?.id ?? "window"}`;
+            const showYearLabel = pointIndex === Math.floor(chartPoints.length / 2);
+            const showWindowLabel = !section || sectionIndex === Math.floor(sectionCount / 2);
+            const existing = points.get(key);
+            const basePoint =
+              existing ??
+              {
+                axisKey: `${section?.name ?? ""}|${showWindowLabel ? windowIndicatorForRound(round) : ""}|${showYearLabel ? year : ""}|${sectionIndex % 2}|${key}`,
+                year,
+                window: round.label,
+                section: section?.name ?? "",
+                color: round.color ?? "#101820"
+              };
+            points.set(key, {
+              ...basePoint,
+              [id]: averageDashboardFieldValue(filteredPlacements, rowsById, assessment, round, field, year, section)
+            });
+          });
         });
+
+        return Array.from(points.values());
       });
-  }, [filteredPlacements, rowsById, roundId, sectionId, selectedAssessment, selectedField, selectedYears]);
+  }, [filteredPlacements, rowsById, roundId, sectionId, selectedFieldRefs, selectedYears]);
+
+  const pieData = useMemo(
+    () =>
+      selectedFieldRefs
+        .map(({ id, label }) => {
+          const values = chartData
+            .map((point) => point[id])
+            .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+          return {
+            name: label,
+            value: values.length ? Math.round((values.reduce((total, value) => total + value, 0) / values.length) * 10) / 10 : 0
+          };
+        })
+        .filter((item) => item.value > 0),
+    [chartData, selectedFieldRefs]
+  );
+  const seriesPalette = ["#101820", "#7868e6", "#0f766e", "#c2410c", "#2563eb", "#be185d", "#6b7280"];
+  const chartTitle =
+    chartType === "progression"
+      ? "Average field score by year and window"
+      : chartType === "comparison"
+        ? "Field comparison by year and window"
+        : "Average selected field values";
+  const chartTypeLabel = chartType === "progression" ? "Progression" : chartType === "comparison" ? "Comparison" : "Average";
 
   function toggleDashboardYear(year: string) {
     setSelectedYears((current) =>
@@ -3655,9 +3969,32 @@ function Dashboard({
     );
   }
 
+  function toggleDashboardAssessment(id: string) {
+    setAssessmentIds((current) => {
+      const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+      return next.length ? next : current;
+    });
+  }
+
+  function toggleDashboardField(id: string) {
+    setFieldKeys((current) => {
+      const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+      return next.length ? next : current;
+    });
+  }
+
   return (
     <section className="dashboard-layout">
       <div className="panel dashboard-filters">
+        <label>
+          Chart type
+          <select value={chartType} onChange={(event) => setChartType(event.target.value as "progression" | "comparison" | "average")}>
+            <option value="progression">Progression</option>
+            <option value="comparison">Comparison</option>
+            <option value="average">Average</option>
+          </select>
+        </label>
+
         <label>
           Home room
           <select value={homeroom} onChange={(event) => setHomeroom(event.target.value)}>
@@ -3682,27 +4019,59 @@ function Dashboard({
           </select>
         </label>
 
-        <label>
-          Assessment
-          <select value={assessmentId} onChange={(event) => setAssessmentId(event.target.value)}>
-            {templates.map((template) => (
-              <option key={template.id} value={template.id}>
-                {template.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="multi-picker">
+          <span>Assessment</span>
+          <button className="picker-field-button" onClick={() => setAssessmentPickerOpen((open) => !open)} type="button">
+            <span>{assessmentPickerLabel}</span>
+            <span className="dropdown-arrow" aria-hidden="true" />
+          </button>
+          {assessmentPickerOpen ? (
+            <div className="multi-picker-menu wide">
+              <label className="checkbox-row select-all-row">
+                <input
+                  checked={allAssessmentsSelected}
+                  onChange={() =>
+                    setAssessmentIds(allAssessmentsSelected ? (templates[0] ? [templates[0].id] : []) : templates.map((template) => template.id))
+                  }
+                  type="checkbox"
+                />
+                All assessments
+              </label>
+              {templates.map((template) => (
+                <label className="checkbox-row" key={template.id}>
+                  <input checked={assessmentIds.includes(template.id)} onChange={() => toggleDashboardAssessment(template.id)} type="checkbox" />
+                  {template.name}
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
 
-        <label>
-          Field
-          <select value={fieldId} onChange={(event) => setFieldId(event.target.value)}>
-            {(selectedAssessment?.fields ?? []).map((field) => (
-              <option key={field.id} value={field.id}>
-                {field.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="multi-picker">
+          <span>Field</span>
+          <button className="picker-field-button" onClick={() => setFieldPickerOpen((open) => !open)} type="button">
+            <span>{fieldPickerLabel}</span>
+            <span className="dropdown-arrow" aria-hidden="true" />
+          </button>
+          {fieldPickerOpen ? (
+            <div className="multi-picker-menu wide">
+              <label className="checkbox-row select-all-row">
+                <input
+                  checked={fieldOptions.length > 0 && fieldKeys.length === fieldOptions.length}
+                  onChange={() => setFieldKeys(fieldKeys.length === fieldOptions.length ? (fieldOptions[0] ? [fieldOptions[0].id] : []) : fieldOptions.map((option) => option.id))}
+                  type="checkbox"
+                />
+                All fields
+              </label>
+              {fieldOptions.map((option) => (
+                <label className="checkbox-row" key={option.id}>
+                  <input checked={fieldKeys.includes(option.id)} onChange={() => toggleDashboardField(option.id)} type="checkbox" />
+                  {option.label}
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
 
         <label>
           Section
@@ -3720,7 +4089,7 @@ function Dashboard({
           Window
           <select value={roundId} onChange={(event) => setRoundId(event.target.value)}>
             <option value="all">All windows</option>
-            {(selectedAssessment?.rounds ?? []).map((round) => (
+            {uniqueDashboardRounds(selectedAssessments).map((round) => (
               <option key={round.id} value={round.id}>
                 {round.label}
               </option>
@@ -3759,33 +4128,72 @@ function Dashboard({
       <div className={progressionFullScreen ? "panel chart-panel progression-chart-panel chart-panel-fullscreen" : "panel chart-panel progression-chart-panel"}>
         <div className="panel-heading chart-panel-heading">
           <div>
-            <p className="eyebrow">Progression</p>
-            <h2>Average field score by year and window</h2>
+            <p className="eyebrow">{chartTypeLabel}</p>
+            <h2>{chartTitle}</h2>
           </div>
           <button className="small-action ghost" onClick={() => setProgressionFullScreen((current) => !current)} type="button">
             {progressionFullScreen ? "Exit full screen" : "Full screen"}
           </button>
         </div>
         <div className="chart-frame">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="axisKey" height={98} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
-              {usesScaleYAxis ? (
-                <YAxis
-                  allowDecimals={false}
-                  domain={[1, selectedScaleCodes.length]}
-                  ticks={selectedScaleCodes.map((_, index) => index + 1)}
-                  tickFormatter={(value) => selectedScaleCodes[Number(value) - 1] ?? ""}
-                  width={48}
-                />
+          {chartType === "average" && !pieData.length ? (
+            <div className="dashboard-chart-empty">No values match the selected filters.</div>
+          ) : (
+            <ResponsiveContainer width="100%" height="100%">
+              {chartType === "progression" ? (
+                <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="axisKey" height={98} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
+                  {usesScaleYAxis ? (
+                    <YAxis
+                      allowDecimals={false}
+                      domain={[1, selectedScaleCodes.length]}
+                      ticks={selectedScaleCodes.map((_, index) => index + 1)}
+                      tickFormatter={(value) => selectedScaleCodes[Number(value) - 1] ?? ""}
+                      width={48}
+                    />
+                  ) : (
+                    <YAxis allowDecimals={false} />
+                  )}
+                  <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
+                  <Legend />
+                  {selectedFieldRefs.map((option, index) => (
+                    <Line
+                      connectNulls
+                      key={option.id}
+                      type="monotone"
+                      dataKey={option.id}
+                      name={option.label}
+                      stroke={seriesPalette[index % seriesPalette.length]}
+                      strokeWidth={3}
+                      dot={{ r: 4 }}
+                    />
+                  ))}
+                </LineChart>
+              ) : chartType === "comparison" ? (
+                <BarChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="axisKey" height={98} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
+                  <YAxis allowDecimals={false} />
+                  <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
+                  <Legend />
+                  {selectedFieldRefs.map((option, index) => (
+                    <Bar key={option.id} dataKey={option.id} name={option.label} fill={seriesPalette[index % seriesPalette.length]} />
+                  ))}
+                </BarChart>
               ) : (
-                <YAxis allowDecimals={false} />
+                <PieChart>
+                  <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
+                  <Legend />
+                  <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={110} label>
+                    {pieData.map((entry, index) => (
+                      <Cell key={entry.name} fill={seriesPalette[index % seriesPalette.length]} />
+                    ))}
+                  </Pie>
+                </PieChart>
               )}
-              <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
-              <Line connectNulls type="monotone" dataKey="averageScore" stroke="#101820" strokeWidth={3} dot={<DashboardDot />} />
-            </LineChart>
-          </ResponsiveContainer>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
     </section>
@@ -3917,6 +4325,17 @@ function uniqueDashboardStudents(rows: OrfResultRow[]) {
       return true;
     })
     .sort((first, second) => first.student.localeCompare(second.student));
+}
+
+function uniqueDashboardRounds(assessments: AssessmentTemplate[]) {
+  const seen = new Set<string>();
+  return assessments
+    .flatMap((assessment) => assessment.rounds)
+    .filter((round) => {
+      if (seen.has(round.id)) return false;
+      seen.add(round.id);
+      return true;
+    });
 }
 
 function ProfilePage({
@@ -4396,24 +4815,45 @@ function StudentReport({
   recordAudit: RecordAudit;
 }) {
   const [studentKey, setStudentKey] = useState(rows[0] ? dashboardStudentKey(rows[0]) : "");
-  const [assessmentId, setAssessmentId] = useState(templates[0]?.id ?? "");
+  const [assessmentIds, setAssessmentIds] = useState<string[]>(templates[0] ? [templates[0].id] : []);
+  const [evaluationPickerOpen, setEvaluationPickerOpen] = useState(false);
   const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
   const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
   const reportStudents = useMemo(() => uniqueDashboardStudents(rows), [rows]);
   const selectedStudent = reportStudents.find((row) => dashboardStudentKey(row) === studentKey) ?? reportStudents[0];
   const selectedStudentKey = selectedStudent ? dashboardStudentKey(selectedStudent) : "";
-  const selectedTemplate = templates.find((template) => template.id === assessmentId) ?? templates[0];
+  const selectedTemplates = useMemo(
+    () => templates.filter((template) => assessmentIds.includes(template.id)),
+    [assessmentIds, templates]
+  );
+  const allEvaluationsSelected = assessmentIds.length === templates.length;
+  const evaluationPickerLabel = allEvaluationsSelected
+    ? "All evaluations"
+    : selectedTemplates.length === 1
+      ? selectedTemplates[0].name
+      : selectedTemplates.length
+        ? `${selectedTemplates.length} evaluations`
+        : "No evaluations";
   const allYearsSelected = selectedYears.length === schoolYears.length;
   const reportRows = useMemo(
     () =>
-      selectedStudent && selectedTemplate
-        ? studentReportRows(selectedStudentKey, selectedStudent.student, selectedTemplate, selectedYears, placements, rowsById)
+      selectedStudent && selectedTemplates.length
+        ? selectedTemplates.flatMap((template) =>
+            studentReportRows(selectedStudentKey, selectedStudent.student, template, selectedYears, placements, rowsById)
+          )
         : [],
-    [placements, rowsById, selectedStudent, selectedStudentKey, selectedTemplate, selectedYears]
+    [placements, rowsById, selectedStudent, selectedStudentKey, selectedTemplates, selectedYears]
   );
-  const reportText = selectedStudent && selectedTemplate
-    ? studentReportText(selectedStudent.student, selectedTemplate, selectedYears, reportRows)
+  const reportText = selectedStudent && selectedTemplates.length
+    ? studentReportText(selectedStudent.student, selectedTemplates, selectedYears, reportRows)
     : "";
+
+  useEffect(() => {
+    setAssessmentIds((current) => {
+      const valid = current.filter((id) => templates.some((template) => template.id === id));
+      return valid.length ? valid : templates[0] ? [templates[0].id] : [];
+    });
+  }, [templates]);
 
   function toggleReportYear(year: string) {
     setSelectedYears((current) =>
@@ -4421,17 +4861,25 @@ function StudentReport({
     );
   }
 
+  function toggleReportEvaluation(id: string) {
+    setAssessmentIds((current) => {
+      const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+      return next.length ? next : current;
+    });
+  }
+
   function downloadExcelReport() {
-    if (!selectedStudent || !selectedTemplate || !selectedYears.length) return;
+    if (!selectedStudent || !selectedTemplates.length || !selectedYears.length) return;
     const workbook = studentReportWorkbook(reportRows);
-    XLSX.writeFile(workbook, `${safeFileName(`${selectedStudent.student}-${selectedTemplate.name}-assessment-report`)}.xlsx`, {
+    const assessmentName = selectedTemplates.length === 1 ? selectedTemplates[0].name : "Multiple Evaluations";
+    XLSX.writeFile(workbook, `${safeFileName(`${selectedStudent.student}-${assessmentName}-assessment-report`)}.xlsx`, {
       compression: true
     });
     recordAudit(
       "Downloaded report",
       "Student report",
       selectedStudent.student,
-      `Generated an Excel report for ${selectedTemplate.name} across ${selectedYears.join(", ")}.`
+      `Generated an Excel report for ${selectedTemplates.map((template) => template.name).join(", ")} across ${selectedYears.join(", ")}.`
     );
   }
 
@@ -4453,16 +4901,31 @@ function StudentReport({
           </select>
         </label>
 
-        <label>
-          Evaluation
-          <select value={assessmentId} onChange={(event) => setAssessmentId(event.target.value)}>
-            {templates.map((template) => (
-              <option key={template.id} value={template.id}>
-                {template.name}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="multi-picker">
+          <span>Evaluation</span>
+          <button className="picker-field-button" onClick={() => setEvaluationPickerOpen((open) => !open)} type="button">
+            <span>{evaluationPickerLabel}</span>
+            <span className="dropdown-arrow" aria-hidden="true" />
+          </button>
+          {evaluationPickerOpen ? (
+            <div className="multi-picker-menu wide">
+              <label className="checkbox-row select-all-row">
+                <input
+                  checked={allEvaluationsSelected}
+                  onChange={() => setAssessmentIds(allEvaluationsSelected ? (templates[0] ? [templates[0].id] : []) : templates.map((template) => template.id))}
+                  type="checkbox"
+                />
+                All evaluations
+              </label>
+              {templates.map((template) => (
+                <label className="checkbox-row" key={template.id}>
+                  <input checked={assessmentIds.includes(template.id)} onChange={() => toggleReportEvaluation(template.id)} type="checkbox" />
+                  {template.name}
+                </label>
+              ))}
+            </div>
+          ) : null}
+        </div>
 
         <div className="report-year-picker">
           <label className="checkbox-row select-all-row">
@@ -4595,12 +5058,12 @@ function studentReportRows(
   return reportRows;
 }
 
-function studentReportText(studentName: string, template: AssessmentTemplate, selectedYears: string[], rows: StudentReportRow[]) {
+function studentReportText(studentName: string, templates: AssessmentTemplate[], selectedYears: string[], rows: StudentReportRow[]) {
   const lines = [
     "Student Assessment Report",
     "",
     `Student: ${studentName}`,
-    `Assessment: ${template.name}`,
+    `Assessment: ${templates.map((template) => template.name).join(", ")}`,
     `Years: ${selectedYears.length ? selectedYears.slice().sort(compareSchoolYears).join(", ") : "None selected"}`,
     ""
   ];
@@ -4619,7 +5082,7 @@ function studentReportText(studentName: string, template: AssessmentTemplate, se
     const first = groupRows[0];
     lines.push(`${first.year}${first.grade ? ` / Grade ${first.grade}` : ""}${first.homeroom ? ` / ${first.homeroom}` : ""}`);
     groupRows.forEach((row) => {
-      const label = [row.window, row.section, row.field].filter(Boolean).join(" / ");
+      const label = [row.assessment, row.window, row.section, row.field].filter(Boolean).join(" / ");
       lines.push(`  ${label}: ${row.value || "-"}`);
     });
     lines.push("");

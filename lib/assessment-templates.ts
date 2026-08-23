@@ -40,12 +40,23 @@ export type AssessmentSectionTemplate = {
   roundIds: string[];
 };
 
+export type AssessmentDefinitionSnapshot = {
+  name: string;
+  description: string;
+  gradeScope: string;
+  rounds: AssessmentRoundTemplate[];
+  sections?: AssessmentSectionTemplate[];
+  fields: AssessmentFieldTemplate[];
+};
+
 export type AssessmentTemplate = {
   id: string;
   name: string;
   category: "Literacy" | "Numeracy" | "Reports" | "Custom";
   description: string;
   gradeScope: string;
+  definitionYears?: string[];
+  yearDefinitions?: Record<string, AssessmentDefinitionSnapshot>;
   rounds: AssessmentRoundTemplate[];
   sections?: AssessmentSectionTemplate[];
   fields: AssessmentFieldTemplate[];
