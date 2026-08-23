@@ -81,6 +81,12 @@ import {
 } from "@/lib/dashboard-charts";
 import { resolveScaleCodeEditorValue, validScaleCodeValue } from "@/lib/scale-code";
 import {
+  addReportStudentId,
+  matchingReportStudentOptions,
+  reconcileReportStudentIds,
+  removeReportStudentId
+} from "@/lib/student-report";
+import {
   canCreateStudentNote,
   canMutateStudentNote,
   filterStudentNotesForRole,
@@ -1873,7 +1879,13 @@ export default function StudentEvaluationApp() {
         ) : activeView === "dashboard" ? (
           <Dashboard rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
         ) : activeView === "report" ? (
-          <StudentReport rows={orfRows} placements={overviewPlacements} templates={templates} schoolYears={schoolYears} recordAudit={recordAudit} />
+          <StudentReport
+            rows={authorizedRows}
+            placements={authorizedPlacements}
+            templates={templates}
+            schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]}
+            recordAudit={recordAudit}
+          />
         ) : activeView === "files" ? (
           <ReportFiles rows={orfRows} reports={uploadedReports} setReports={setUploadedReports} recordAudit={recordAudit} />
         ) : activeView === "profile" ? (
@@ -4977,14 +4989,38 @@ function StudentReport({
   schoolYears: string[];
   recordAudit: RecordAudit;
 }) {
-  const [studentKey, setStudentKey] = useState(rows[0] ? dashboardStudentKey(rows[0]) : "");
+  const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
+  const reportStudents = useMemo(() => buildStudentIdentityOptions(rows, placements), [placements, rows]);
+  const reportStudentsById = useMemo(
+    () => new Map(reportStudents.map((student) => [student.id, student])),
+    [reportStudents]
+  );
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>(() =>
+    reportStudents[0] ? [reportStudents[0].id] : []
+  );
+  const hasInitializedStudentSelectionRef = useRef(reportStudents.length > 0);
+  const [studentSearchText, setStudentSearchText] = useState("");
+  const [studentSearchOpen, setStudentSearchOpen] = useState(false);
   const [assessmentIds, setAssessmentIds] = useState<string[]>(templates[0] ? [templates[0].id] : []);
   const [evaluationPickerOpen, setEvaluationPickerOpen] = useState(false);
   const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
-  const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
-  const reportStudents = useMemo(() => uniqueDashboardStudents(rows), [rows]);
-  const selectedStudent = reportStudents.find((row) => dashboardStudentKey(row) === studentKey) ?? reportStudents[0];
-  const selectedStudentKey = selectedStudent ? dashboardStudentKey(selectedStudent) : "";
+  const selectedStudents = useMemo(
+    () =>
+      selectedStudentIds.reduce<Array<{ id: string; name: string; detail: string; row: OrfResultRow }>>(
+        (students, studentId) => {
+          const option = reportStudentsById.get(studentId);
+          const row = rowsById.get(studentId);
+          if (option && row) students.push({ ...option, row });
+          return students;
+        },
+        []
+      ),
+    [reportStudentsById, rowsById, selectedStudentIds]
+  );
+  const matchingStudentOptions = useMemo(
+    () => matchingReportStudentOptions(reportStudents, selectedStudentIds, studentSearchText),
+    [reportStudents, selectedStudentIds, studentSearchText]
+  );
   const selectedTemplates = useMemo(
     () => templates.filter((template) => assessmentIds.includes(template.id)),
     [assessmentIds, templates]
@@ -4998,18 +5034,25 @@ function StudentReport({
         ? `${selectedTemplates.length} evaluations`
         : "No evaluations";
   const allYearsSelected = selectedYears.length === schoolYears.length;
-  const reportRows = useMemo(
+  const studentReportBundles = useMemo(
     () =>
-      selectedStudent && selectedTemplates.length
-        ? selectedTemplates.flatMap((template) =>
-            studentReportRows(selectedStudentKey, selectedStudent.student, template, selectedYears, placements, rowsById)
-          )
+      selectedTemplates.length
+        ? selectedStudents.map((student) => ({
+            student,
+            rows: selectedTemplates.flatMap((template) =>
+              studentReportRows(student.id, student.name, template, selectedYears, placements, rowsById)
+            )
+          }))
         : [],
-    [placements, rowsById, selectedStudent, selectedStudentKey, selectedTemplates, selectedYears]
+    [placements, rowsById, selectedStudents, selectedTemplates, selectedYears]
   );
-  const reportText = selectedStudent && selectedTemplates.length
-    ? studentReportText(selectedStudent.student, selectedTemplates, selectedYears, reportRows)
-    : "";
+  const reportRows = useMemo(
+    () => studentReportBundles.flatMap((report) => report.rows),
+    [studentReportBundles]
+  );
+  const reportText = studentReportBundles
+    .map((report) => studentReportText(report.student.name, selectedTemplates, selectedYears, report.rows))
+    .join(`\n\n${"-".repeat(64)}\n\n`);
 
   useEffect(() => {
     setAssessmentIds((current) => {
@@ -5017,6 +5060,17 @@ function StudentReport({
       return valid.length ? valid : templates[0] ? [templates[0].id] : [];
     });
   }, [templates]);
+
+  useEffect(() => {
+    setSelectedStudentIds((current) => {
+      const valid = reconcileReportStudentIds(current, reportStudents);
+      if (!hasInitializedStudentSelectionRef.current && reportStudents[0]) {
+        hasInitializedStudentSelectionRef.current = true;
+        return valid.length ? valid : [reportStudents[0].id];
+      }
+      return valid;
+    });
+  }, [reportStudents]);
 
   function toggleReportYear(year: string) {
     setSelectedYears((current) =>
@@ -5031,18 +5085,31 @@ function StudentReport({
     });
   }
 
+  function selectReportStudent(studentId: string) {
+    setSelectedStudentIds((current) => addReportStudentId(current, studentId));
+    setStudentSearchText("");
+    setStudentSearchOpen(false);
+  }
+
+  function removeReportStudent(studentId: string) {
+    setSelectedStudentIds((current) => removeReportStudentId(current, studentId));
+  }
+
   function downloadExcelReport() {
-    if (!selectedStudent || !selectedTemplates.length || !selectedYears.length) return;
+    if (!selectedStudents.length || !selectedTemplates.length || !selectedYears.length) return;
     const workbook = studentReportWorkbook(reportRows);
     const assessmentName = selectedTemplates.length === 1 ? selectedTemplates[0].name : "Multiple Evaluations";
-    XLSX.writeFile(workbook, `${safeFileName(`${selectedStudent.student}-${assessmentName}-assessment-report`)}.xlsx`, {
+    const studentFileLabel = selectedStudents.length === 1 ? selectedStudents[0].name : `${selectedStudents.length}-students`;
+    const auditStudentLabel = selectedStudents.length === 1 ? selectedStudents[0].name : `${selectedStudents.length} students`;
+    const selectedStudentNames = selectedStudents.map((student) => student.name).join(", ");
+    XLSX.writeFile(workbook, `${safeFileName(`${studentFileLabel}-${assessmentName}-assessment-report`)}.xlsx`, {
       compression: true
     });
     recordAudit(
       "Downloaded report",
       "Student report",
-      selectedStudent.student,
-      `Generated an Excel report for ${selectedTemplates.map((template) => template.name).join(", ")} across ${selectedYears.join(", ")}.`
+      auditStudentLabel,
+      `Generated an Excel report for ${selectedStudentNames}; evaluations: ${selectedTemplates.map((template) => template.name).join(", ")}; years: ${selectedYears.join(", ")}.`
     );
   }
 
@@ -5050,19 +5117,87 @@ function StudentReport({
     <section className="report-layout">
       <div className="panel report-controls">
         <p className="eyebrow">Student Report</p>
-        <h2>Individual assessment summary</h2>
-        <p>Generate a student-specific report for sharing assessment context with an Ed Psych team.</p>
+        <h2>Student assessment summary</h2>
+        <p>Generate one report for one or more students to share assessment context with an Ed Psych team.</p>
 
-        <label>
-          Student
-          <select value={selectedStudentKey} onChange={(event) => setStudentKey(event.target.value)}>
-            {reportStudents.map((row) => (
-              <option key={dashboardStudentKey(row)} value={dashboardStudentKey(row)}>
-                {row.student}
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="report-student-picker">
+          <div className="report-student-search-box">
+            <label className="report-student-search">
+              Find students
+              <input
+                aria-autocomplete="list"
+                aria-controls="report-student-search-results"
+                aria-expanded={studentSearchOpen && matchingStudentOptions.length > 0}
+                autoComplete="off"
+                placeholder="Search by student name"
+                role="combobox"
+                value={studentSearchText}
+                onBlur={() => setStudentSearchOpen(false)}
+                onChange={(event) => {
+                  setStudentSearchText(event.target.value);
+                  setStudentSearchOpen(true);
+                }}
+                onFocus={() => setStudentSearchOpen(true)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setStudentSearchOpen(false);
+                    return;
+                  }
+                  if (event.key === "Enter" && studentSearchText.trim() && matchingStudentOptions[0]) {
+                    event.preventDefault();
+                    selectReportStudent(matchingStudentOptions[0].id);
+                  }
+                }}
+              />
+            </label>
+            {studentSearchOpen && matchingStudentOptions.length ? (
+              <div
+                className="overview-student-search-results report-student-search-results"
+                id="report-student-search-results"
+                role="listbox"
+              >
+                {matchingStudentOptions.map((option) => (
+                  <button
+                    aria-selected="false"
+                    key={option.id}
+                    onMouseDown={(event) => {
+                      event.preventDefault();
+                      selectReportStudent(option.id);
+                    }}
+                    role="option"
+                    type="button"
+                  >
+                    <strong>{option.name}</strong>
+                    <span>{option.detail}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="report-selected-students" aria-label="Selected students" role="list">
+            {selectedStudents.length ? (
+              selectedStudents.map((student) => (
+                <div className="report-student-chip" key={student.id} role="listitem">
+                  <span>
+                    <strong>{student.name}</strong>
+                    <small>{student.detail}</small>
+                  </span>
+                  <button
+                    aria-label={`Remove ${student.name}, ${student.detail}`}
+                    onClick={() => removeReportStudent(student.id)}
+                    title={`Remove ${student.name}`}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))
+            ) : (
+              <p className="report-student-empty">No students selected.</p>
+            )}
+          </div>
+        </div>
 
         <div className="multi-picker">
           <span>Evaluation</span>
@@ -5107,7 +5242,12 @@ function StudentReport({
           ))}
         </div>
 
-        <button className="primary-action" disabled={!selectedYears.length} onClick={downloadExcelReport} type="button">
+        <button
+          className="primary-action"
+          disabled={!selectedStudents.length || !selectedTemplates.length || !selectedYears.length}
+          onClick={downloadExcelReport}
+          type="button"
+        >
           Download Excel report
         </button>
       </div>
@@ -5122,6 +5262,7 @@ function StudentReport({
 }
 
 type StudentReportRow = {
+  studentId: string;
   year: string;
   grade: string;
   homeroom: string;
@@ -5135,7 +5276,7 @@ type StudentReportRow = {
 };
 
 function studentReportRows(
-  studentKey: string,
+  studentId: string,
   studentName: string,
   template: AssessmentTemplate,
   selectedYears: string[],
@@ -5150,10 +5291,7 @@ function studentReportRows(
     .forEach((year) => {
       const yearPlacements = placements
         .filter((placement) => placement.schoolYear === year)
-        .filter((placement) => {
-          const row = rowsById.get(placement.studentId);
-          return row ? dashboardStudentKey(row) === studentKey : false;
-        });
+        .filter((placement) => placement.studentId === studentId);
 
       yearPlacements.forEach((placement) => {
         const student = rowsById.get(placement.studentId);
@@ -5169,6 +5307,7 @@ function studentReportRows(
               .filter((field) => field.sectionIds?.includes(section.id))
               .forEach((field) => {
                 reportRows.push({
+                  studentId,
                   year,
                   grade: placement.grade,
                   homeroom: placement.homeroom,
@@ -5187,6 +5326,7 @@ function studentReportRows(
             .filter((field) => !field.sectionIds?.some((sectionId) => sectionsForRound.some((section) => section.id === sectionId)))
             .forEach((field) => {
               reportRows.push({
+                studentId,
                 year,
                 grade: placement.grade,
                 homeroom: placement.homeroom,
@@ -5205,6 +5345,7 @@ function studentReportRows(
 
   if (!reportRows.length && selectedYears.length) {
     return selectedYears.slice().sort(compareSchoolYears).map((year) => ({
+      studentId,
       year,
       grade: "",
       homeroom: "",
@@ -5372,8 +5513,8 @@ function reportColumnKey(row: Pick<StudentReportRow, "year" | "window" | "sectio
   return [row.year, row.window, row.section, row.field].join("|");
 }
 
-function reportPlacementKey(row: Pick<StudentReportRow, "year" | "grade" | "homeroom" | "student">) {
-  return [row.year, row.grade, row.homeroom, row.student].join("|");
+function reportPlacementKey(row: Pick<StudentReportRow, "studentId" | "year" | "grade" | "homeroom">) {
+  return [row.studentId, row.year, row.grade, row.homeroom].join("|");
 }
 
 function formatReportValue(value: unknown) {
