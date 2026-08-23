@@ -21,6 +21,8 @@ import {
   LineChart,
   Pie,
   PieChart,
+  ReferenceArea,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -68,6 +70,15 @@ import {
 } from "@/lib/assessment-entry";
 import { applySpreadsheetAssessmentValues } from "@/lib/spreadsheet-import";
 import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
+import {
+  addDashboardChart,
+  compactDashboardAxisLabel,
+  dashboardYearGroups,
+  formatDashboardTooltipLabel,
+  labelDashboardYears,
+  removeDashboardChart,
+  type DashboardChartAxisPoint
+} from "@/lib/dashboard-charts";
 import { resolveScaleCodeEditorValue, validScaleCodeValue } from "@/lib/scale-code";
 import {
   canCreateStudentNote,
@@ -3724,16 +3735,89 @@ function VpOverview({
   );
 }
 
-function Dashboard({
-  rows,
-  placements,
-  templates,
-  schoolYears
-}: {
+type DashboardProps = {
   rows: OrfResultRow[];
   placements: StudentPlacement[];
   templates: AssessmentTemplate[];
   schoolYears: string[];
+};
+
+type DashboardChartPointBase = DashboardChartAxisPoint & {
+  sectionLabel: string;
+  windowLabel: string;
+  sectionLine: number;
+  color: string;
+  [key: string]: string | number | null;
+};
+
+type DashboardChartPoint = DashboardChartPointBase & {
+  yearLabel: string;
+};
+
+function Dashboard(props: DashboardProps) {
+  const nextChartNumber = useRef(2);
+  const [chartIds, setChartIds] = useState(["dashboard-chart-1"]);
+
+  function handleAddChart() {
+    const chartId = `dashboard-chart-${nextChartNumber.current}`;
+    nextChartNumber.current += 1;
+    setChartIds((current) => addDashboardChart(current, chartId));
+  }
+
+  return (
+    <section className="dashboard-layout">
+      <div className="dashboard-toolbar">
+        <div>
+          <p className="eyebrow">Dashboard charts</p>
+          <p className="dashboard-toolbar-copy">Add charts to compare different filters side by side.</p>
+        </div>
+      </div>
+
+      {chartIds.length ? (
+        <div className="dashboard-chart-strip" aria-label="Dashboard charts" role="region">
+          {chartIds.map((chartId, index) => (
+            <DashboardChartCard
+              {...props}
+              chartId={chartId}
+              chartNumber={index + 1}
+              canRemove={chartIds.length > 1}
+              key={chartId}
+              onAdd={handleAddChart}
+              onRemove={() => setChartIds((current) => removeDashboardChart(current, chartId))}
+              showAdd={index === chartIds.length - 1}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="panel dashboard-no-charts">
+          <p>No charts are open.</p>
+          <button className="small-action" onClick={handleAddChart} type="button">
+            Add chart
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DashboardChartCard({
+  rows,
+  placements,
+  templates,
+  schoolYears,
+  chartId,
+  chartNumber,
+  canRemove,
+  onAdd,
+  onRemove,
+  showAdd
+}: DashboardProps & {
+  chartId: string;
+  chartNumber: number;
+  canRemove: boolean;
+  onAdd: () => void;
+  onRemove: () => void;
+  showAdd: boolean;
 }) {
   const [chartType, setChartType] = useState<"progression" | "comparison" | "average">("progression");
   const [homeroom, setHomeroom] = useState("all");
@@ -3881,20 +3965,13 @@ function Dashboard({
 
   const chartData = useMemo(() => {
     if (!selectedFieldRefs.length) return [];
-    return selectedYears
+    const pointsByYear = selectedYears
       .slice()
       .sort(compareSchoolYears)
       .flatMap((year) => {
         const points = new Map<
           string,
-          {
-            axisKey: string;
-            year: string;
-            window: string;
-            section: string;
-            color: string;
-            [key: string]: string | number | null;
-          }
+          DashboardChartPointBase
         >();
 
         selectedFieldRefs.forEach(({ id, assessment, field }) => {
@@ -3914,18 +3991,20 @@ function Dashboard({
             return roundPoints;
           }, []);
 
-          chartPoints.forEach(({ round, section, sectionIndex, sectionCount }, pointIndex) => {
+          chartPoints.forEach(({ round, section, sectionIndex, sectionCount }) => {
             const key = `${assessment.id}-${year}-${round.id}-${section?.id ?? "window"}`;
-            const showYearLabel = pointIndex === Math.floor(chartPoints.length / 2);
             const showWindowLabel = !section || sectionIndex === Math.floor(sectionCount / 2);
             const existing = points.get(key);
             const basePoint =
               existing ??
               {
-                axisKey: `${section?.name ?? ""}|${showWindowLabel ? windowIndicatorForRound(round) : ""}|${showYearLabel ? year : ""}|${sectionIndex % 2}|${key}`,
+                axisKey: key,
                 year,
                 window: round.label,
                 section: section?.name ?? "",
+                sectionLabel: compactDashboardAxisLabel(section?.name ?? ""),
+                windowLabel: showWindowLabel ? compactDashboardAxisLabel(windowIndicatorForRound(round), 14) : "",
+                sectionLine: sectionIndex % 2,
                 color: round.color ?? "#101820"
               };
             points.set(key, {
@@ -3937,7 +4016,14 @@ function Dashboard({
 
         return Array.from(points.values());
       });
+    return labelDashboardYears(pointsByYear) as DashboardChartPoint[];
   }, [filteredPlacements, rowsById, roundId, sectionId, selectedFieldRefs, selectedYears]);
+
+  const chartPointsByAxisKey = useMemo(
+    () => new Map(chartData.map((point) => [point.axisKey, point])),
+    [chartData]
+  );
+  const yearGroups = useMemo(() => dashboardYearGroups(chartData), [chartData]);
 
   const pieData = useMemo(
     () =>
@@ -3983,8 +4069,13 @@ function Dashboard({
     });
   }
 
+  function renderDashboardAxisTick(props: DashboardAxisTickProps) {
+    const axisKey = String(props.payload?.value ?? "");
+    return <DashboardAxisTick {...props} point={chartPointsByAxisKey.get(axisKey)} />;
+  }
+
   return (
-    <section className="dashboard-layout">
+    <div className="dashboard-chart-workspace" data-dashboard-chart={chartId}>
       <div className="panel dashboard-filters">
         <label>
           Chart type
@@ -4143,7 +4234,25 @@ function Dashboard({
               {chartType === "progression" ? (
                 <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="axisKey" height={98} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
+                  {yearGroups.map((group, index) => (
+                    <ReferenceArea
+                      fill={index % 2 ? "#7868e6" : "#68b39b"}
+                      fillOpacity={0.06}
+                      key={`progression-area-${group.year}`}
+                      strokeOpacity={0}
+                      x1={group.firstAxisKey}
+                      x2={group.lastAxisKey}
+                    />
+                  ))}
+                  {yearGroups.slice(1).map((group) => (
+                    <ReferenceLine
+                      key={`progression-boundary-${group.year}`}
+                      stroke="#66707c"
+                      strokeWidth={2}
+                      x={group.firstAxisKey}
+                    />
+                  ))}
+                  <XAxis dataKey="axisKey" height={98} interval={0} tick={renderDashboardAxisTick} tickMargin={12} />
                   {usesScaleYAxis ? (
                     <YAxis
                       allowDecimals={false}
@@ -4155,7 +4264,12 @@ function Dashboard({
                   ) : (
                     <YAxis allowDecimals={false} />
                   )}
-                  <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
+                  <Tooltip
+                    formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
+                    labelFormatter={(_, payload) =>
+                      formatDashboardTooltipLabel(payload[0]?.payload as DashboardChartAxisPoint | undefined)
+                    }
+                  />
                   <Legend />
                   {selectedFieldRefs.map((option, index) => (
                     <Line
@@ -4173,9 +4287,32 @@ function Dashboard({
               ) : chartType === "comparison" ? (
                 <BarChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="axisKey" height={98} interval={0} tick={<DashboardAxisTick />} tickMargin={12} />
+                  {yearGroups.map((group, index) => (
+                    <ReferenceArea
+                      fill={index % 2 ? "#7868e6" : "#68b39b"}
+                      fillOpacity={0.06}
+                      key={`comparison-area-${group.year}`}
+                      strokeOpacity={0}
+                      x1={group.firstAxisKey}
+                      x2={group.lastAxisKey}
+                    />
+                  ))}
+                  {yearGroups.slice(1).map((group) => (
+                    <ReferenceLine
+                      key={`comparison-boundary-${group.year}`}
+                      stroke="#66707c"
+                      strokeWidth={2}
+                      x={group.firstAxisKey}
+                    />
+                  ))}
+                  <XAxis dataKey="axisKey" height={98} interval={0} tick={renderDashboardAxisTick} tickMargin={12} />
                   <YAxis allowDecimals={false} />
-                  <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
+                  <Tooltip
+                    formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
+                    labelFormatter={(_, payload) =>
+                      formatDashboardTooltipLabel(payload[0]?.payload as DashboardChartAxisPoint | undefined)
+                    }
+                  />
                   <Legend />
                   {selectedFieldRefs.map((option, index) => (
                     <Bar key={option.id} dataKey={option.id} name={option.label} fill={seriesPalette[index % seriesPalette.length]} />
@@ -4183,7 +4320,10 @@ function Dashboard({
                 </BarChart>
               ) : (
                 <PieChart>
-                  <Tooltip formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)} />
+                  <Tooltip
+                    formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
+                    labelFormatter={() => "Selected field average"}
+                  />
                   <Legend />
                   <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={110} label>
                     {pieData.map((entry, index) => (
@@ -4196,18 +4336,41 @@ function Dashboard({
           )}
         </div>
       </div>
-    </section>
+      <div className="dashboard-chart-footer">
+        {canRemove ? (
+          <button aria-label={`Remove chart ${chartNumber}`} className="small-action ghost" onClick={onRemove} type="button">
+            Remove chart
+          </button>
+        ) : null}
+        {showAdd ? (
+          <button className="small-action" onClick={onAdd} type="button">
+            Add chart
+          </button>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
-function DashboardAxisTick(props: { x?: number; y?: number; payload?: { value?: string } }) {
-  if (typeof props.x !== "number" || typeof props.y !== "number") return null;
-  const [sectionLabel = "", windowLabel = "", yearLabel = "", sectionLine = "0"] = String(props.payload?.value ?? "").split("|");
+type DashboardAxisTickProps = {
+  x?: string | number;
+  y?: string | number;
+  payload?: { value?: unknown };
+};
+
+function DashboardAxisTick(props: DashboardAxisTickProps & { point?: DashboardChartPoint }) {
+  const x = Number(props.x);
+  const y = Number(props.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const sectionLabel = props.point?.sectionLabel ?? "";
+  const windowLabel = props.point?.windowLabel ?? "";
+  const yearLabel = props.point?.yearLabel ?? "";
   const hasSection = Boolean(sectionLabel);
-  const staggerSection = sectionLine === "1";
+  const staggerSection = props.point?.sectionLine === 1;
 
   return (
-    <g transform={`translate(${props.x},${props.y})`}>
+    <g transform={`translate(${x},${y})`}>
+      <title>{formatDashboardTooltipLabel(props.point)}</title>
       {hasSection ? (
         <text x={0} y={staggerSection ? 18 : 4} textAnchor="middle" fill="#101820" fontSize={10} fontWeight={900}>
           {sectionLabel}

@@ -1480,18 +1480,58 @@ textarea {
 
 .dashboard-layout {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-auto-rows: max-content;
-  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.dashboard-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 16px;
 }
 
-.dashboard-filters {
-  grid-column: span 2;
-  align-self: start;
+.dashboard-toolbar-copy {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.dashboard-chart-strip {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  overflow-x: auto;
+  padding: 0 0 10px;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scroll-snap-type: x proximity;
+}
+
+.dashboard-chart-workspace {
+  flex: 1 0 1000px;
+  min-width: 1000px;
+  display: grid;
+  gap: 16px;
+  scroll-snap-align: start;
+}
+
+.dashboard-no-charts {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.dashboard-no-charts p,
+.dashboard-no-charts .small-action {
+  margin: 0;
 }
 
 .dashboard-filters {
+  align-self: start;
   display: grid;
   grid-template-columns: repeat(8, minmax(0, 1fr));
   gap: 10px;
@@ -1569,7 +1609,7 @@ textarea {
 }
 
 .progression-chart-panel {
-  grid-column: 1 / -1;
+  min-width: 0;
 }
 
 .chart-panel-heading {
@@ -1584,6 +1624,17 @@ textarea {
   white-space: nowrap;
 }
 
+.dashboard-chart-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dashboard-chart-footer .small-action {
+  margin-top: 0;
+}
+
 .chart-frame {
   width: 100%;
   height: 320px;
@@ -1593,6 +1644,7 @@ textarea {
   position: fixed;
   inset: 16px;
   z-index: 80;
+  min-width: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   height: auto;
