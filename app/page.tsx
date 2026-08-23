@@ -82,9 +82,16 @@ import {
 import { resolveScaleCodeEditorValue, validScaleCodeValue } from "@/lib/scale-code";
 import {
   addReportStudentId,
+  buildStudentReportBlocks,
+  buildStudentReportWorksheetLayout,
   matchingReportStudentOptions,
   reconcileReportStudentIds,
-  removeReportStudentId
+  removeReportStudentId,
+  STUDENT_REPORT_NO_DATA_ID,
+  studentReportHeaderGroups,
+  type StudentReportBlock,
+  type StudentReportSourceRow,
+  type StudentReportWorksheetBlock
 } from "@/lib/student-report";
 import {
   canCreateStudentNote,
@@ -5025,7 +5032,7 @@ function StudentReport({
     () => templates.filter((template) => assessmentIds.includes(template.id)),
     [assessmentIds, templates]
   );
-  const allEvaluationsSelected = assessmentIds.length === templates.length;
+  const allEvaluationsSelected = templates.length > 0 && templates.every((template) => assessmentIds.includes(template.id));
   const evaluationPickerLabel = allEvaluationsSelected
     ? "All evaluations"
     : selectedTemplates.length === 1
@@ -5033,26 +5040,21 @@ function StudentReport({
       : selectedTemplates.length
         ? `${selectedTemplates.length} evaluations`
         : "No evaluations";
-  const allYearsSelected = selectedYears.length === schoolYears.length;
-  const studentReportBundles = useMemo(
+  const allYearsSelected = schoolYears.length > 0 && schoolYears.every((year) => selectedYears.includes(year));
+  const reportBlocks = useMemo(
     () =>
-      selectedTemplates.length
-        ? selectedStudents.map((student) => ({
-            student,
-            rows: selectedTemplates.flatMap((template) =>
-              studentReportRows(student.id, student.name, template, selectedYears, placements, rowsById)
-            )
-          }))
-        : [],
+      buildStudentReportBlocks(
+        selectedTemplates.map((template) => ({
+          assessmentId: template.id,
+          assessmentName: template.name,
+          rows: selectedStudents.flatMap((student) =>
+            studentReportRows(student.id, student.name, template, selectedYears, placements, rowsById)
+          )
+        }))
+      ),
     [placements, rowsById, selectedStudents, selectedTemplates, selectedYears]
   );
-  const reportRows = useMemo(
-    () => studentReportBundles.flatMap((report) => report.rows),
-    [studentReportBundles]
-  );
-  const reportText = studentReportBundles
-    .map((report) => studentReportText(report.student.name, selectedTemplates, selectedYears, report.rows))
-    .join(`\n\n${"-".repeat(64)}\n\n`);
+  const sortedSelectedYears = useMemo(() => selectedYears.slice().sort(compareSchoolYears), [selectedYears]);
 
   useEffect(() => {
     setAssessmentIds((current) => {
@@ -5071,6 +5073,10 @@ function StudentReport({
       return valid;
     });
   }, [reportStudents]);
+
+  useEffect(() => {
+    setSelectedYears((current) => current.filter((year) => schoolYears.includes(year)));
+  }, [schoolYears]);
 
   function toggleReportYear(year: string) {
     setSelectedYears((current) =>
@@ -5096,8 +5102,8 @@ function StudentReport({
   }
 
   function downloadExcelReport() {
-    if (!selectedStudents.length || !selectedTemplates.length || !selectedYears.length) return;
-    const workbook = studentReportWorkbook(reportRows);
+    if (!selectedStudents.length || !selectedTemplates.length || !selectedYears.length || !reportBlocks.length) return;
+    const workbook = studentReportWorkbook(reportBlocks);
     const assessmentName = selectedTemplates.length === 1 ? selectedTemplates[0].name : "Multiple Evaluations";
     const studentFileLabel = selectedStudents.length === 1 ? selectedStudents[0].name : `${selectedStudents.length}-students`;
     const auditStudentLabel = selectedStudents.length === 1 ? selectedStudents[0].name : `${selectedStudents.length} students`;
@@ -5254,26 +5260,120 @@ function StudentReport({
 
       <div className="panel report-preview">
         <div className="report-paper">
-          <pre>{reportText}</pre>
+          <header className="report-document-header">
+            <p className="eyebrow">Student Assessment Report</p>
+            <h2>Assessment summary</h2>
+            <dl>
+              <div>
+                <dt>Students</dt>
+                <dd>{selectedStudents.length ? selectedStudents.map((student) => student.name).join(", ") : "None selected"}</dd>
+              </div>
+              <div>
+                <dt>Years</dt>
+                <dd>{sortedSelectedYears.length ? sortedSelectedYears.join(", ") : "None selected"}</dd>
+              </div>
+            </dl>
+          </header>
+
+          {!selectedStudents.length ? (
+            <p className="report-preview-empty">Select at least one student to preview a report.</p>
+          ) : !selectedTemplates.length ? (
+            <p className="report-preview-empty">Select at least one evaluation to preview a report.</p>
+          ) : !selectedYears.length ? (
+            <p className="report-preview-empty">Select at least one school year to preview a report.</p>
+          ) : (
+            <div className="report-assessment-stack">
+              {reportBlocks.map((block) => (
+                <StudentReportAssessmentTable block={block} key={block.assessmentId} />
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-type StudentReportRow = {
-  studentId: string;
-  year: string;
-  grade: string;
-  homeroom: string;
-  student: string;
-  assessment: string;
-  window: string;
-  windowColor: string;
-  section: string;
-  field: string;
-  value: string;
-};
+function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) {
+  const yearGroups = studentReportHeaderGroups(block.columns, "year");
+  const windowGroups = studentReportHeaderGroups(block.columns, "window");
+  const sectionGroups = studentReportHeaderGroups(block.columns, "section");
+
+  return (
+    <section aria-label={`${block.assessmentName} report`} className="report-assessment-block">
+      <h3>{block.assessmentName}</h3>
+      <div className="report-table-scroll">
+        <table className="report-assessment-table">
+          <caption>{block.assessmentName} assessment results</caption>
+          <thead>
+            <tr>
+              <th colSpan={3} scope="row">Assessment Year</th>
+              {yearGroups.map((group) => (
+                <th colSpan={group.span} key={group.key} scope="colgroup">{group.label}</th>
+              ))}
+            </tr>
+            <tr>
+              <th colSpan={3} scope="row">Assessment Window</th>
+              {windowGroups.map((group) => (
+                <th
+                  colSpan={group.span}
+                  key={group.key}
+                  scope="colgroup"
+                  style={{ backgroundColor: group.windowColor }}
+                >
+                  {group.label}
+                </th>
+              ))}
+            </tr>
+            <tr>
+              <th colSpan={3} scope="row">Assessment Section</th>
+              {sectionGroups.map((group) => (
+                <th
+                  colSpan={group.span}
+                  key={group.key}
+                  scope="colgroup"
+                  style={{ backgroundColor: group.windowColor }}
+                >
+                  {group.label}
+                </th>
+              ))}
+            </tr>
+            <tr>
+              <th scope="col">Student</th>
+              <th scope="col">Grade</th>
+              <th scope="col">Homeroom</th>
+              {block.columns.map((column) => (
+                <th key={column.key} scope="col" style={{ backgroundColor: column.windowColor }}>
+                  {column.field}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {block.rows.length ? (
+              block.rows.map((row) => (
+                <tr key={row.key}>
+                  <th scope="row">{row.student}</th>
+                  <td>{row.grade || "-"}</td>
+                  <td>{row.homeroom || "-"}</td>
+                  {block.columns.map((column) => (
+                    <td key={column.key} style={{ backgroundColor: column.windowColor }}>
+                      {row.values[column.key] || "-"}
+                    </td>
+                  ))}
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan={Math.max(3, block.columns.length + 3)}>No assessment data matches the selected students and years.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
 
 function studentReportRows(
   studentId: string,
@@ -5282,13 +5382,15 @@ function studentReportRows(
   selectedYears: string[],
   placements: StudentPlacement[],
   rowsById: Map<string, OrfResultRow>
-): StudentReportRow[] {
-  const reportRows: StudentReportRow[] = [];
+): StudentReportSourceRow[] {
+  const reportRows: StudentReportSourceRow[] = [];
 
   selectedYears
     .slice()
     .sort(compareSchoolYears)
     .forEach((year) => {
+      const yearTemplate = assessmentTemplateForYear(template, year);
+      const yearRowStart = reportRows.length;
       const yearPlacements = placements
         .filter((placement) => placement.schoolYear === year)
         .filter((placement) => placement.studentId === studentId);
@@ -5298,9 +5400,9 @@ function studentReportRows(
         if (!student) return;
         const context = { schoolYear: placement.schoolYear, grade: placement.grade };
 
-        template.rounds.forEach((round) => {
-          const sectionsForRound = sectionsForAssessmentRound(template, round);
-          const fieldsForRound = template.fields.filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id));
+        yearTemplate.rounds.forEach((round) => {
+          const sectionsForRound = sectionsForAssessmentRound(yearTemplate, round);
+          const fieldsForRound = yearTemplate.fields.filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id));
 
           sectionsForRound.forEach((section) => {
             fieldsForRound
@@ -5312,12 +5414,16 @@ function studentReportRows(
                   grade: placement.grade,
                   homeroom: placement.homeroom,
                   student: student.student,
-                  assessment: template.name,
+                  assessmentId: template.id,
+                  assessment: yearTemplate.name,
+                  roundId: round.id,
                   window: round.label,
                   windowColor: round.color ?? "#fffaf0",
+                  sectionId: section.id,
                   section: section.name,
+                  fieldId: field.id,
                   field: field.name,
-                  value: formatReportValue(entryValue(student, template, round, field, section, context))
+                  value: formatReportValue(entryValue(student, yearTemplate, round, field, section, context))
                 });
               });
           });
@@ -5331,154 +5437,90 @@ function studentReportRows(
                 grade: placement.grade,
                 homeroom: placement.homeroom,
                 student: student.student,
-                assessment: template.name,
+                assessmentId: template.id,
+                assessment: yearTemplate.name,
+                roundId: round.id,
                 window: round.label,
                 windowColor: round.color ?? "#fffaf0",
+                sectionId: "",
                 section: "",
+                fieldId: field.id,
                 field: field.name,
-                value: formatReportValue(entryValue(student, template, round, field, undefined, context))
+                value: formatReportValue(entryValue(student, yearTemplate, round, field, undefined, context))
               });
-            });
+          });
         });
       });
-    });
 
-  if (!reportRows.length && selectedYears.length) {
-    return selectedYears.slice().sort(compareSchoolYears).map((year) => ({
-      studentId,
-      year,
-      grade: "",
-      homeroom: "",
-      student: studentName,
-      assessment: template.name,
-      window: "",
-      windowColor: "#fffaf0",
-      section: "",
-      field: "No data",
-      value: ""
-    }));
-  }
+      if (reportRows.length === yearRowStart) {
+        reportRows.push({
+          studentId,
+          year,
+          grade: "",
+          homeroom: "",
+          student: studentName,
+          assessmentId: template.id,
+          assessment: yearTemplate.name,
+          roundId: STUDENT_REPORT_NO_DATA_ID,
+          window: "No data",
+          windowColor: "#fffaf0",
+          sectionId: STUDENT_REPORT_NO_DATA_ID,
+          section: "No data",
+          fieldId: STUDENT_REPORT_NO_DATA_ID,
+          field: "No data",
+          value: ""
+        });
+      }
+    });
 
   return reportRows;
 }
 
-function studentReportText(studentName: string, templates: AssessmentTemplate[], selectedYears: string[], rows: StudentReportRow[]) {
-  const lines = [
-    "Student Assessment Report",
-    "",
-    `Student: ${studentName}`,
-    `Assessment: ${templates.map((template) => template.name).join(", ")}`,
-    `Years: ${selectedYears.length ? selectedYears.slice().sort(compareSchoolYears).join(", ") : "None selected"}`,
-    ""
-  ];
+function studentReportWorkbook(blocks: StudentReportBlock[]) {
+  const layout = buildStudentReportWorksheetLayout(blocks);
+  const worksheet = XLSX.utils.aoa_to_sheet(layout.rows);
+  worksheet["!merges"] = layout.merges.map((merge) => ({
+    s: { r: merge.startRow, c: merge.startColumn },
+    e: { r: merge.endRow, c: merge.endColumn }
+  }));
 
-  if (!rows.length) {
-    return [...lines, "No report data matches the current filters."].join("\n");
-  }
-
-  const groups = new Map<string, StudentReportRow[]>();
-  rows.forEach((row) => {
-    const key = [row.year, row.grade, row.homeroom].join("|");
-    groups.set(key, [...(groups.get(key) ?? []), row]);
-  });
-
-  groups.forEach((groupRows) => {
-    const first = groupRows[0];
-    lines.push(`${first.year}${first.grade ? ` / Grade ${first.grade}` : ""}${first.homeroom ? ` / ${first.homeroom}` : ""}`);
-    groupRows.forEach((row) => {
-      const label = [row.assessment, row.window, row.section, row.field].filter(Boolean).join(" / ");
-      lines.push(`  ${label}: ${row.value || "-"}`);
-    });
-    lines.push("");
-  });
-
-  return lines.join("\n").trimEnd();
-}
-
-function studentReportWorkbook(rows: StudentReportRow[]) {
-  const columns = uniqueReportColumns(rows);
-  const groupKeys = uniqueIds(rows.map((row) => reportPlacementKey(row)));
-  const rowsByGroup = new Map<string, StudentReportRow[]>();
-  rows.forEach((row) => {
-    const key = reportPlacementKey(row);
-    rowsByGroup.set(key, [...(rowsByGroup.get(key) ?? []), row]);
-  });
-
-  const sheetRows = [
-    ["Assessment Year", "", "", ...columns.map((column) => column.year)],
-    ["Assessment Window", "", "", ...columns.map((column) => column.window)],
-    ["Assessment Section", "", "", ...columns.map((column) => column.section)],
-    ["Student", "Grade", "Homeroom", ...columns.map((column) => column.field)],
-    ...groupKeys.map((key) => {
-      const groupRows = rowsByGroup.get(key) ?? [];
-      const first = groupRows[0];
-      return [
-        first?.student ?? "",
-        first?.grade ?? "",
-        first?.homeroom ?? "",
-        ...columns.map((column) => {
-          const match = groupRows.find((row) => reportColumnKey(row) === column.key);
-          return match?.value ?? "";
-        })
-      ];
-    })
-  ];
-
-  const worksheet = XLSX.utils.aoa_to_sheet(sheetRows);
-  worksheet["!merges"] = [
-    ...mergedHeaderRanges(sheetRows[0], 3, 0),
-    ...mergedHeaderRanges(sheetRows[1], 3, 1),
-    ...mergedHeaderRanges(sheetRows[2], 3, 2)
-  ];
+  const dynamicColumnCount = Math.max(0, ...blocks.map((block) => block.columns.length));
   worksheet["!cols"] = [
     { wch: 24 },
     { wch: 10 },
     { wch: 14 },
-    ...columns.map((column) => ({ wch: Math.max(12, Math.min(24, column.field.length + 2)) }))
+    ...Array.from({ length: dynamicColumnCount }, (_, index) => {
+      const fieldWidth = Math.max(0, ...blocks.map((block) => block.columns[index]?.field.length ?? 0));
+      return { wch: Math.max(12, Math.min(24, fieldWidth + 2)) };
+    })
   ];
-  styleReportWorksheet(worksheet, sheetRows.length, sheetRows[0].length, columns);
+  layout.blocks.forEach((block) => styleReportWorksheetBlock(worksheet, block));
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Student Report");
   return workbook;
 }
 
-function mergedHeaderRanges(row: string[], startColumn: number, rowIndex: number): XLSX.Range[] {
-  const merges: XLSX.Range[] = [];
-  let column = startColumn;
-
-  while (column < row.length) {
-    const value = row[column];
-    let endColumn = column;
-    while (endColumn + 1 < row.length && row[endColumn + 1] === value) {
-      endColumn += 1;
-    }
-    if (value && endColumn > column) {
-      merges.push({ s: { r: rowIndex, c: column }, e: { r: rowIndex, c: endColumn } });
-    }
-    column = endColumn + 1;
-  }
-
-  return merges;
-}
-
-function styleReportWorksheet(
-  worksheet: XLSX.WorkSheet,
-  rowCount: number,
-  columnCount: number,
-  columns: Array<{ windowColor: string }>
-) {
-  for (let row = 0; row < rowCount; row += 1) {
-    for (let column = 0; column < columnCount; column += 1) {
+function styleReportWorksheetBlock(worksheet: XLSX.WorkSheet, range: StudentReportWorksheetBlock) {
+  for (let row = range.titleRow; row <= range.endRow; row += 1) {
+    for (let column = 0; column < range.columnCount; column += 1) {
       const cellAddress = XLSX.utils.encode_cell({ r: row, c: column });
       const cell = worksheet[cellAddress];
       if (!cell) continue;
-      const windowColor = column >= 3 ? columns[column - 3]?.windowColor : undefined;
-      const fillColor = windowColor ? windowColor.replace("#", "").toUpperCase() : column < 3 && row < 4 ? "EFE7D5" : undefined;
+
+      const isTitle = row === range.titleRow;
+      const isHeader = row >= range.headerStartRow && row < range.dataStartRow;
+      const reportColumn = column >= 3 ? range.block.columns[column - 3] : undefined;
+      const windowColor = reportColumn?.windowColor.replace("#", "").toUpperCase();
+      const fillColor = isTitle ? "24465B" : windowColor || (isHeader && column < 3 ? "EFE7D5" : undefined);
       cell.s = {
         ...(cell.s ?? {}),
-        alignment: { horizontal: row < 4 ? "center" : "left", vertical: "center", wrapText: true },
-        font: row < 4 ? { bold: true } : undefined,
+        alignment: {
+          horizontal: isTitle ? "left" : isHeader ? "center" : "left",
+          vertical: "center",
+          wrapText: true
+        },
+        font: isTitle ? { bold: true, color: { rgb: "FFFFFF" } } : isHeader ? { bold: true } : undefined,
         fill: fillColor ? { patternType: "solid", fgColor: { rgb: fillColor } } : undefined,
         border: {
           top: { style: "thin", color: { rgb: "B8B0A1" } },
@@ -5489,32 +5531,6 @@ function styleReportWorksheet(
       };
     }
   }
-}
-
-function uniqueReportColumns(rows: StudentReportRow[]) {
-  const seen = new Set<string>();
-  return rows
-    .map((row) => ({
-      key: reportColumnKey(row),
-      year: row.year,
-      window: row.window,
-      windowColor: row.windowColor,
-      section: row.section,
-      field: row.field
-    }))
-    .filter((column) => {
-      if (seen.has(column.key)) return false;
-      seen.add(column.key);
-      return true;
-    });
-}
-
-function reportColumnKey(row: Pick<StudentReportRow, "year" | "window" | "section" | "field">) {
-  return [row.year, row.window, row.section, row.field].join("|");
-}
-
-function reportPlacementKey(row: Pick<StudentReportRow, "studentId" | "year" | "grade" | "homeroom">) {
-  return [row.studentId, row.year, row.grade, row.homeroom].join("|");
 }
 
 function formatReportValue(value: unknown) {

@@ -1761,11 +1761,117 @@ textarea {
   border-radius: 4px;
 }
 
-.report-paper pre {
+.report-document-header {
+  padding-bottom: 18px;
+  border-bottom: 2px solid var(--ink);
+}
+
+.report-document-header h2 {
+  margin: 4px 0 12px;
+}
+
+.report-document-header dl {
+  display: grid;
+  gap: 6px;
   margin: 0;
-  white-space: pre-wrap;
+}
+
+.report-document-header dl > div {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.report-document-header dt {
+  font-weight: 800;
+}
+
+.report-document-header dd {
+  margin: 0;
+}
+
+.report-preview-empty {
+  margin: 24px 0 0;
+  padding: 18px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.report-assessment-stack {
+  display: grid;
+  gap: 28px;
+  margin-top: 24px;
+}
+
+.report-assessment-block {
+  min-width: 0;
+}
+
+.report-assessment-block h3 {
+  margin: 0 0 10px;
+  font-size: 1.08rem;
+}
+
+.report-table-scroll {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid #b8b0a1;
+  border-radius: 4px;
+}
+
+.report-assessment-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
   color: var(--ink);
-  font: 0.98rem/1.55 Arial, Helvetica, sans-serif;
+  font: 0.86rem/1.35 Arial, Helvetica, sans-serif;
+}
+
+.report-assessment-table caption {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.report-assessment-table th,
+.report-assessment-table td {
+  min-width: 110px;
+  padding: 8px 10px;
+  border: 1px solid #b8b0a1;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.report-assessment-table thead th {
+  font-weight: 800;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.report-assessment-table thead th[colspan="3"],
+.report-assessment-table thead tr:last-child th:nth-child(-n + 3) {
+  background: #efe7d5;
+}
+
+.report-assessment-table tbody th {
+  min-width: 170px;
+  background: #fffdf7;
+  font-weight: 800;
+}
+
+.report-assessment-table tbody td:nth-child(2) {
+  min-width: 72px;
+}
+
+.report-assessment-table tbody td:nth-child(3) {
+  min-width: 105px;
 }
 
 .notes-layout {

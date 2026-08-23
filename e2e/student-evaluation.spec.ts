@@ -121,9 +121,9 @@ test("overview, dashboard filters, notes popup, reports, and files render core w
   await expect(page.getByText("Below-50 count by homeroom")).toBeVisible();
 
   await page.getByRole("button", { name: "Student Report" }).click();
-  await expect(page.getByText("Individual assessment summary")).toBeVisible();
+  await expect(page.getByText("Student assessment summary")).toBeVisible();
   const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Download text report" }).click();
+  await page.getByRole("button", { name: "Download Excel report" }).click();
   expect((await download).suggestedFilename()).toContain("assessment-report");
 
   await page.getByRole("button", { name: "Report Files" }).click();
