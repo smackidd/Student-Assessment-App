@@ -1479,9 +1479,14 @@ textarea {
 }
 
 .dashboard-layout {
+  min-height: 0;
+  max-height: 100%;
   display: grid;
+  align-content: start;
   gap: 16px;
   min-width: 0;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .dashboard-toolbar {
