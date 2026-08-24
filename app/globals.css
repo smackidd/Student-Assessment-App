@@ -1642,6 +1642,16 @@ textarea {
   height: 320px;
 }
 
+.dashboard-legend-label {
+  display: inline-block;
+  min-width: 5ch;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .chart-panel-fullscreen {
   position: fixed;
   inset: 16px;

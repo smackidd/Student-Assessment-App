@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   addDashboardChart,
-  compactDashboardAxisLabel,
+  compactDashboardChartLabel,
+  compactDashboardLegendLabel,
+  dashboardAxisLabelCharacterLimit,
+  dashboardLegendLabelCharacterLimit,
   dashboardYearGroups,
   formatDashboardTooltipLabel,
   labelDashboardYears,
@@ -17,10 +20,23 @@ const points = [
 ];
 
 describe("dashboard chart presentation", () => {
-  it("compacts long axis labels deterministically and keeps short labels intact", () => {
-    expect(compactDashboardAxisLabel("  Letter   ID  ")).toBe("Letter ID");
-    expect(compactDashboardAxisLabel("Phonological Awareness", 16)).toBe("Phonological…");
-    expect(compactDashboardAxisLabel("UninterruptedLabel", 8)).toBe("Uninter…");
+  it("compacts crowded labels to at least five characters and keeps short labels intact", () => {
+    expect(compactDashboardChartLabel("  Letter   ID  ")).toBe("Letter ID");
+    expect(compactDashboardChartLabel("Phonological Awareness", 16)).toBe("Phonological Awa...");
+    expect(compactDashboardChartLabel("Winter", 5)).toBe("Winte...");
+    expect(compactDashboardChartLabel("Fall", 2)).toBe("Fall");
+  });
+
+  it("uses chart density to shorten axis and legend labels only when space is tight", () => {
+    expect(dashboardAxisLabelCharacterLimit(1000, 60)).toBe(5);
+    expect(dashboardAxisLabelCharacterLimit(1000, 8)).toBe(16);
+    expect(dashboardLegendLabelCharacterLimit(1000, 1)).toBe(32);
+    expect(dashboardLegendLabelCharacterLimit(1000, 8)).toBe(12);
+  });
+
+  it("keeps the Field portion distinguishable when a legend label is shortened", () => {
+    expect(compactDashboardLegendLabel("Oral Reading Fluency / WPM", 16)).toBe("Oral Rea... / WPM");
+    expect(compactDashboardLegendLabel("Oral Reading Fluency / Comprehension", 12)).toBe("Oral... / Compr...");
   });
 
   it("identifies each contiguous school-year boundary and midpoint", () => {

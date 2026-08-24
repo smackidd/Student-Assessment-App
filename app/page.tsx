@@ -72,7 +72,10 @@ import { applySpreadsheetAssessmentValues } from "@/lib/spreadsheet-import";
 import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
 import {
   addDashboardChart,
-  compactDashboardAxisLabel,
+  compactDashboardChartLabel,
+  compactDashboardLegendLabel,
+  dashboardAxisLabelCharacterLimit,
+  dashboardLegendLabelCharacterLimit,
   dashboardYearGroups,
   formatDashboardTooltipLabel,
   labelDashboardYears,
@@ -3855,6 +3858,7 @@ function DashboardChartCard({
   const [fieldPickerOpen, setFieldPickerOpen] = useState(false);
   const [yearPickerOpen, setYearPickerOpen] = useState(false);
   const [progressionFullScreen, setProgressionFullScreen] = useState(false);
+  const [chartWidth, setChartWidth] = useState(1000);
   const allYearsSelected = selectedYears.length === schoolYears.length;
   const allAssessmentsSelected = assessmentIds.length === templates.length;
   const fieldOptions = useMemo(
@@ -4021,8 +4025,8 @@ function DashboardChartCard({
                 year,
                 window: round.label,
                 section: section?.name ?? "",
-                sectionLabel: compactDashboardAxisLabel(section?.name ?? ""),
-                windowLabel: showWindowLabel ? compactDashboardAxisLabel(windowIndicatorForRound(round), 14) : "",
+                sectionLabel: section?.name ?? "",
+                windowLabel: showWindowLabel ? windowIndicatorForRound(round) : "",
                 sectionLine: sectionIndex % 2,
                 color: round.color ?? "#101820"
               };
@@ -4067,6 +4071,39 @@ function DashboardChartCard({
         ? "Field comparison by year and window"
         : "Average selected field values";
   const chartTypeLabel = chartType === "progression" ? "Progression" : chartType === "comparison" ? "Comparison" : "Average";
+  const axisLabelCharacterLimit = dashboardAxisLabelCharacterLimit(chartWidth, chartData.length);
+  const legendLabelCharacterLimit = dashboardLegendLabelCharacterLimit(chartWidth, selectedFieldRefs.length);
+
+  const handleChartResize = useCallback((width: number) => {
+    const nextWidth = Math.max(1, Math.round(width));
+    setChartWidth((current) => (current === nextWidth ? current : nextWidth));
+  }, []);
+
+  const renderDashboardAxisTick = useCallback(
+    (props: DashboardAxisTickProps) => {
+      const axisKey = String(props.payload?.value ?? "");
+      return (
+        <DashboardAxisTick
+          {...props}
+          labelCharacterLimit={axisLabelCharacterLimit}
+          point={chartPointsByAxisKey.get(axisKey)}
+        />
+      );
+    },
+    [axisLabelCharacterLimit, chartPointsByAxisKey]
+  );
+
+  const renderDashboardLegendLabel = useCallback(
+    (value: string | number) => {
+      const fullLabel = String(value);
+      return (
+        <span aria-label={fullLabel} className="dashboard-legend-label" title={fullLabel}>
+          {compactDashboardLegendLabel(fullLabel, legendLabelCharacterLimit)}
+        </span>
+      );
+    },
+    [legendLabelCharacterLimit]
+  );
 
   function toggleDashboardYear(year: string) {
     setSelectedYears((current) =>
@@ -4086,11 +4123,6 @@ function DashboardChartCard({
       const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
       return next.length ? next : current;
     });
-  }
-
-  function renderDashboardAxisTick(props: DashboardAxisTickProps) {
-    const axisKey = String(props.payload?.value ?? "");
-    return <DashboardAxisTick {...props} point={chartPointsByAxisKey.get(axisKey)} />;
   }
 
   return (
@@ -4249,7 +4281,7 @@ function DashboardChartCard({
           {chartType === "average" && !pieData.length ? (
             <div className="dashboard-chart-empty">No values match the selected filters.</div>
           ) : (
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" onResize={handleChartResize}>
               {chartType === "progression" ? (
                 <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" />
@@ -4289,7 +4321,7 @@ function DashboardChartCard({
                       formatDashboardTooltipLabel(payload[0]?.payload as DashboardChartAxisPoint | undefined)
                     }
                   />
-                  <Legend />
+                  <Legend formatter={renderDashboardLegendLabel} />
                   {selectedFieldRefs.map((option, index) => (
                     <Line
                       connectNulls
@@ -4332,7 +4364,7 @@ function DashboardChartCard({
                       formatDashboardTooltipLabel(payload[0]?.payload as DashboardChartAxisPoint | undefined)
                     }
                   />
-                  <Legend />
+                  <Legend formatter={renderDashboardLegendLabel} />
                   {selectedFieldRefs.map((option, index) => (
                     <Bar key={option.id} dataKey={option.id} name={option.label} fill={seriesPalette[index % seriesPalette.length]} />
                   ))}
@@ -4343,7 +4375,7 @@ function DashboardChartCard({
                     formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
                     labelFormatter={() => "Selected field average"}
                   />
-                  <Legend />
+                  <Legend formatter={renderDashboardLegendLabel} />
                   <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={110} label>
                     {pieData.map((entry, index) => (
                       <Cell key={entry.name} fill={seriesPalette[index % seriesPalette.length]} />
@@ -4377,12 +4409,14 @@ type DashboardAxisTickProps = {
   payload?: { value?: unknown };
 };
 
-function DashboardAxisTick(props: DashboardAxisTickProps & { point?: DashboardChartPoint }) {
+function DashboardAxisTick(
+  props: DashboardAxisTickProps & { labelCharacterLimit: number; point?: DashboardChartPoint }
+) {
   const x = Number(props.x);
   const y = Number(props.y);
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  const sectionLabel = props.point?.sectionLabel ?? "";
-  const windowLabel = props.point?.windowLabel ?? "";
+  const sectionLabel = compactDashboardChartLabel(props.point?.sectionLabel ?? "", props.labelCharacterLimit);
+  const windowLabel = compactDashboardChartLabel(props.point?.windowLabel ?? "", props.labelCharacterLimit);
   const yearLabel = props.point?.yearLabel ?? "";
   const hasSection = Boolean(sectionLabel);
   const staggerSection = props.point?.sectionLine === 1;
