@@ -806,6 +806,18 @@ textarea {
   width: auto;
 }
 
+.calculated-checkbox {
+  accent-color: #176b45;
+  height: 18px;
+  margin: 0;
+  vertical-align: middle;
+  width: 18px;
+}
+
+.calculated-checkbox.pending {
+  display: inline-block;
+}
+
 .primary-action {
   margin-top: 16px;
 }

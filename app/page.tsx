@@ -59,6 +59,7 @@ import {
   entryValue,
   fieldSectionSummary,
   fieldWindowSummary,
+  assessmentFieldAppliesToGrade,
   isEditableAssessmentField,
   labelsForIds,
   sectionsForAssessmentRound,
@@ -193,6 +194,31 @@ const predefinedCalculations = [
     key: "percentage",
     label: "Percentage",
     description: "Calculates Score divided by Total in the current section, then multiplies by 100."
+  },
+  {
+    key: "cc3_component_total",
+    label: "CC3 component total",
+    description: "Uses the official CC3 maximum of 40 for the applicable grade and window."
+  },
+  {
+    key: "cc3_requires_support",
+    label: "CC3 requires support",
+    description: "Checks when Regular Words and either Irregular Words or Non-words fall in the provincial support ranges."
+  },
+  {
+    key: "provincial_numeracy_component_total",
+    label: "Provincial numeracy total",
+    description: "Uses the official maximum possible score for the applicable component, grade, and window."
+  },
+  {
+    key: "provincial_numeracy_weighted_score",
+    label: "Provincial numeracy weighted score",
+    description: "Calculates and rounds the official weighted screener score to a maximum of 100."
+  },
+  {
+    key: "provincial_numeracy_requires_support",
+    label: "Provincial numeracy requires support",
+    description: "Checks when the completed weighted score falls in the provincial support range."
   }
 ] as const;
 const defaultCalculationKey = predefinedCalculations[0].key;
@@ -5437,8 +5463,11 @@ function studentReportRows(
         const context = { schoolYear: placement.schoolYear, grade: placement.grade };
 
         yearTemplate.rounds.forEach((round) => {
-          const sectionsForRound = sectionsForAssessmentRound(yearTemplate, round);
-          const fieldsForRound = yearTemplate.fields.filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id));
+          const sectionsForRound = sectionsForAssessmentRound(yearTemplate, round, placement.grade);
+          const fieldsForRound = yearTemplate.fields.filter((field) =>
+            assessmentFieldAppliesToGrade(field, placement.grade) &&
+            (!field.roundIds?.length || field.roundIds.includes(round.id))
+          );
 
           sectionsForRound.forEach((section) => {
             fieldsForRound
@@ -7264,6 +7293,19 @@ function fieldColumn(
         ? "agNumberCellEditor"
         : undefined,
     cellEditorParams: scaleCodeParams ?? numberEditorParams,
+    cellRenderer: field.displayStyle === "checkbox"
+      ? (params: { value?: unknown }) => (
+          params.value == null
+            ? <span className="calculated-checkbox pending" aria-label={`${field.name} not yet calculated`} />
+            : <input
+                aria-label={field.name}
+                checked={params.value === true || params.value === 1}
+                className="calculated-checkbox"
+                disabled
+                type="checkbox"
+              />
+        )
+      : undefined,
     valueGetter: (params) => params.data?.[fieldName] ?? null,
     valueSetter: (params) => {
       if (!params.data) return false;
@@ -7309,9 +7351,13 @@ function columnsForRound(
   context: { schoolYear?: string; grade?: string } = {}
 ): ColDef<EntryRow>[] {
   const fieldsForRound = assessment.fields.filter(
-    (field) => !hiddenFieldIds.includes(field.id) && (!field.roundIds?.length || field.roundIds.includes(round.id))
+    (field) =>
+      assessmentFieldAppliesToGrade(field, context.grade) &&
+      !hiddenFieldIds.includes(field.id) &&
+      (!field.roundIds?.length || field.roundIds.includes(round.id))
   );
-  const sectionsForRound = sectionsForAssessmentRound(assessment, round).filter((section) => !hiddenSectionIds.includes(section.id));
+  const sectionsForRound = sectionsForAssessmentRound(assessment, round, context.grade)
+    .filter((section) => !hiddenSectionIds.includes(section.id));
   const sectionColumns: ColDef<EntryRow>[] = sectionsForRound
     .flatMap((section) => {
       const sectionFields = fieldsForRound.filter((field) => field.sectionIds?.includes(section.id));

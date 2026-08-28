@@ -318,6 +318,113 @@ describe("assessment entry rows", () => {
   });
 });
 
+describe("provincial screening calculations", () => {
+  it("applies the CC3 total and compound support rule for the selected grade and window", () => {
+    const cc3 = assessmentTemplates.find((assessment) => assessment.id === "cc3") as AssessmentTemplate;
+    const fall = cc3.rounds.find((round) => round.id === "fall")!;
+    const score = cc3.fields.find((field) => field.id === "score")!;
+    const total = cc3.fields.find((field) => field.id === "total")!;
+    const support = cc3.fields.find((field) => field.calculationKey === "cc3_requires_support")!;
+    const regular = cc3.sections!.find((section) => section.id === "regular")!;
+    const irregular = cc3.sections!.find((section) => section.id === "irregular")!;
+    const nonword = cc3.sections!.find((section) => section.id === "nonword")!;
+    const context = { schoolYear: "2025-2026", grade: "3" };
+
+    let row = emptyRow();
+    row = updateAssessmentRowFromTableEdit(row, cc3, assessmentValueKey(cc3, fall, score, regular), 21, context);
+    row = updateAssessmentRowFromTableEdit(row, cc3, assessmentValueKey(cc3, fall, score, irregular), 20, context);
+    row = updateAssessmentRowFromTableEdit(row, cc3, assessmentValueKey(cc3, fall, score, nonword), 7, context);
+    let entry = buildEntryRows([row], cc3, context)[0];
+
+    expect(entry[assessmentValueKey(cc3, fall, total, regular)]).toBe(40);
+    expect(entry[assessmentValueKey(cc3, fall, support)]).toBe(1);
+
+    row = updateAssessmentRowFromTableEdit(row, cc3, assessmentValueKey(cc3, fall, score, regular), 22, context);
+    entry = buildEntryRows([row], cc3, context)[0];
+    expect(entry[assessmentValueKey(cc3, fall, support)]).toBe(0);
+  });
+
+  it("leaves the CC3 support checkbox blank until all three component scores are present", () => {
+    const cc3 = assessmentTemplates.find((assessment) => assessment.id === "cc3") as AssessmentTemplate;
+    const winter = cc3.rounds.find((round) => round.id === "winter")!;
+    const score = cc3.fields.find((field) => field.id === "score")!;
+    const support = cc3.fields.find((field) => field.calculationKey === "cc3_requires_support")!;
+    const regular = cc3.sections!.find((section) => section.id === "regular")!;
+    const context = { schoolYear: "2025-2026", grade: "4" };
+    const row = updateAssessmentRowFromTableEdit(
+      emptyRow(),
+      cc3,
+      assessmentValueKey(cc3, winter, score, regular),
+      10,
+      context
+    );
+
+    expect(buildEntryRows([row], cc3, context)[0][assessmentValueKey(cc3, winter, support)]).toBeNull();
+  });
+
+  it("calculates provincial numeracy totals, a 100-point weighted score, and the support checkbox", () => {
+    const numeracy = assessmentTemplates.find((assessment) => assessment.id === "ab-ed-numeracy") as AssessmentTemplate;
+    const spring = numeracy.rounds.find((round) => round.id === "spring")!;
+    const context = { schoolYear: "2025-2026", grade: "4" };
+    const weighted = numeracy.fields.find((field) => field.calculationKey === "provincial_numeracy_weighted_score")!;
+    const support = numeracy.fields.find((field) => field.calculationKey === "provincial_numeracy_requires_support")!;
+    let row = emptyRow();
+
+    for (const scoreField of numeracy.fields.filter((field) =>
+      field.gradeIds?.includes("4") && field.slug.endsWith("_score") && !field.isCalculated
+    )) {
+      const totalField = numeracy.fields.find((field) =>
+        field.groupLabel === scoreField.groupLabel && field.calculationKey === "provincial_numeracy_component_total"
+      )!;
+      const total = buildEntryRows([row], numeracy, context)[0][assessmentValueKey(numeracy, spring, totalField)] as number;
+      row = updateAssessmentRowFromTableEdit(
+        row,
+        numeracy,
+        assessmentValueKey(numeracy, spring, scoreField),
+        total,
+        context
+      );
+    }
+
+    const entry = buildEntryRows([row], numeracy, context)[0];
+    const numberLineTotal = numeracy.fields.find((field) =>
+      field.groupLabel === "Number Line" && field.calculationKey === "provincial_numeracy_component_total"
+    )!;
+    const fractionsTotal = numeracy.fields.find((field) =>
+      field.groupLabel === "Fractions" && field.calculationKey === "provincial_numeracy_component_total"
+    )!;
+    expect(entry[assessmentValueKey(numeracy, spring, numberLineTotal)]).toBe(18);
+    expect(entry[assessmentValueKey(numeracy, spring, fractionsTotal)]).toBe(6);
+    expect(entry[assessmentValueKey(numeracy, spring, weighted)]).toBe(100);
+    expect(entry[assessmentValueKey(numeracy, spring, support)]).toBe(0);
+  });
+
+  it("checks provincial numeracy support at a completed zero score and stays blank while incomplete", () => {
+    const numeracy = assessmentTemplates.find((assessment) => assessment.id === "ab-ed-numeracy") as AssessmentTemplate;
+    const winter = numeracy.rounds.find((round) => round.id === "winter")!;
+    const context = { schoolYear: "2025-2026", grade: "3" };
+    const scoreFields = numeracy.fields.filter((field) =>
+      field.gradeIds?.includes("3") && field.slug.endsWith("_score") && !field.isCalculated
+    );
+    const weighted = numeracy.fields.find((field) => field.calculationKey === "provincial_numeracy_weighted_score")!;
+    const support = numeracy.fields.find((field) => field.calculationKey === "provincial_numeracy_requires_support")!;
+
+    let row = updateAssessmentRowFromTableEdit(
+      emptyRow(), numeracy, assessmentValueKey(numeracy, winter, scoreFields[0]), 0, context
+    );
+    expect(buildEntryRows([row], numeracy, context)[0][assessmentValueKey(numeracy, winter, support)]).toBeNull();
+
+    for (const scoreField of scoreFields.slice(1)) {
+      row = updateAssessmentRowFromTableEdit(
+        row, numeracy, assessmentValueKey(numeracy, winter, scoreField), 0, context
+      );
+    }
+    const entry = buildEntryRows([row], numeracy, context)[0];
+    expect(entry[assessmentValueKey(numeracy, winter, weighted)]).toBe(0);
+    expect(entry[assessmentValueKey(numeracy, winter, support)]).toBe(1);
+  });
+});
+
 describe("assessment value validation", () => {
   it("accepts whole-number integers and rejects decimals, scientific notation, hex, negatives, and unsafe values", () => {
     const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
@@ -347,25 +454,23 @@ describe("assessment value validation", () => {
     expect(validateAssessmentValue("101", percentageField).valid).toBe(false);
   });
 
-  it("prevents Score from exceeding the paired Total in either edit order", () => {
+  it("prevents a provincial numeracy Score from exceeding its calculated official Total", () => {
     const numeracy = assessmentTemplates.find((assessment) => assessment.id === "ab-ed-numeracy") as AssessmentTemplate;
     const fall = numeracy.rounds[0];
     const score = numeracy.fields.find((field) => field.groupLabel === "Comparing Numbers" && field.slug.endsWith("_score"))!;
     const total = numeracy.fields.find((field) => field.groupLabel === "Comparing Numbers" && field.slug.endsWith("_total"))!;
     const scoreKey = assessmentValueKey(numeracy, fall, score);
     const totalKey = assessmentValueKey(numeracy, fall, total);
+    const context = { schoolYear: "2025-2026", grade: "3" };
 
-    let row = updateAssessmentRowFromTableEdit(emptyRow(), numeracy, totalKey, 10);
-    const beforeInvalidScore = row;
-    row = updateAssessmentRowFromTableEdit(row, numeracy, scoreKey, 11);
-    expect(row).toBe(beforeInvalidScore);
-    expect(validateAssessmentTableEdit(row, numeracy, scoreKey, 11).valid).toBe(false);
+    const initial = emptyRow();
+    expect(validateAssessmentTableEdit(initial, numeracy, scoreKey, 41, context).valid).toBe(false);
+    expect(updateAssessmentRowFromTableEdit(initial, numeracy, scoreKey, 41, context)).toBe(initial);
+    expect(validateAssessmentTableEdit(initial, numeracy, totalKey, 10, context).valid).toBe(false);
 
-    row = updateAssessmentRowFromTableEdit(row, numeracy, scoreKey, 8);
-    const beforeInvalidTotal = row;
-    row = updateAssessmentRowFromTableEdit(row, numeracy, totalKey, 7);
-    expect(row).toBe(beforeInvalidTotal);
-    expect(buildEntryRows([row], numeracy)[0][scoreKey]).toBe(8);
-    expect(buildEntryRows([row], numeracy)[0][totalKey]).toBe(10);
+    const row = updateAssessmentRowFromTableEdit(initial, numeracy, scoreKey, 40, context);
+    const entry = buildEntryRows([row], numeracy, context)[0];
+    expect(entry[scoreKey]).toBe(40);
+    expect(entry[totalKey]).toBe(40);
   });
 });

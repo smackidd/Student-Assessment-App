@@ -37,4 +37,72 @@ describe("assessment template normalization", () => {
     ]);
     expect(percentileFields.map((field) => field.roundIds)).toEqual([["fall"], ["winter"], ["spring"]]);
   });
+
+  it("adds CC3 to older saved workspaces and keeps both normed assessments scoped to Grades 3 and 4", () => {
+    const olderTemplates = assessmentTemplates.filter((template) => template.id !== "cc3");
+    const normalized = normalizeAssessmentTemplates(olderTemplates);
+    const cc3 = normalized.find((template) => template.id === "cc3")!;
+    const numeracy = normalized.find((template) => template.id === "ab-ed-numeracy")!;
+
+    expect(cc3.gradeScope).toBe("Grades 3-4");
+    expect(cc3.fields.find((field) => field.calculationKey === "cc3_requires_support")?.displayStyle).toBe("checkbox");
+    expect(numeracy.gradeScope).toBe("Grades 3-4");
+    expect(numeracy.fields.find((field) => field.calculationKey === "provincial_numeracy_requires_support")?.displayStyle)
+      .toBe("checkbox");
+  });
+
+  it("upgrades a sectioned spreadsheet-import numeracy definition without changing its existing section ids", () => {
+    const currentNumeracy = assessmentTemplates.find((template) => template.id === "ab-ed-numeracy")!;
+    const legacyNumeracy: AssessmentTemplate = {
+      ...currentNumeracy,
+      sections: [
+        { id: "comparing_numbers", name: "Comparing Numbers", roundIds: ["fall", "winter", "spring"] },
+        { id: "writing_numbers", name: "Writing Numbers", roundIds: ["fall", "winter", "spring"] }
+      ],
+      fields: [
+        {
+          id: "score", name: "score", slug: "score", dataType: "integer",
+          sectionIds: ["comparing_numbers", "writing_numbers"], isRequired: false, isCalculated: false, visibility: "evaluators"
+        },
+        {
+          id: "total", name: "total", slug: "total", dataType: "integer",
+          sectionIds: ["comparing_numbers", "writing_numbers"], isRequired: false, isCalculated: false, visibility: "evaluators"
+        }
+      ]
+    };
+
+    const normalized = normalizeAssessmentTemplates([legacyNumeracy])[0];
+    expect(normalized.sections?.find((section) => section.id === "comparing_numbers")?.gradeIds).toEqual(["3"]);
+    expect(normalized.sections?.some((section) => section.name === "Fractions" && section.gradeIds?.includes("4"))).toBe(true);
+    expect(normalized.fields.find((field) => field.id === "total")?.calculationKey)
+      .toBe("provincial_numeracy_component_total");
+  });
+
+  it("applies the norm calculations to saved school-year snapshots as well as the current definition", () => {
+    const cc3 = assessmentTemplates.find((template) => template.id === "cc3")!;
+    const legacyFields = cc3.fields
+      .filter((field) => field.id !== "requires-additional-supports")
+      .map((field) => field.id === "total"
+        ? { ...field, dataType: "integer" as const, isCalculated: false, calculationKey: undefined }
+        : field);
+    const saved: AssessmentTemplate = {
+      ...cc3,
+      fields: legacyFields,
+      yearDefinitions: {
+        "2025-2026": {
+          name: cc3.name,
+          description: cc3.description,
+          gradeScope: cc3.gradeScope,
+          rounds: cc3.rounds,
+          sections: cc3.sections,
+          fields: legacyFields
+        }
+      }
+    };
+
+    const normalized = normalizeAssessmentTemplates([saved])[0];
+    const yearFields = normalized.yearDefinitions?.["2025-2026"].fields ?? [];
+    expect(yearFields.find((field) => field.id === "total")?.calculationKey).toBe("cc3_component_total");
+    expect(yearFields.some((field) => field.calculationKey === "cc3_requires_support")).toBe(true);
+  });
 });

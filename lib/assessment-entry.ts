@@ -10,6 +10,16 @@ import {
   calculateOrfPercentile,
   resolveOrfPercentileCalculationKey
 } from "@/lib/orf-calculations";
+import {
+  calculateCc3SupportFlag,
+  calculateNumeracyWeightedScore,
+  cc3NormFor,
+  normalizeCc3Component,
+  normalizeNumeracyComponent,
+  numeracyNormFor,
+  type Cc3Component,
+  type NumeracyComponent
+} from "@/lib/provincial-screening-norms";
 import { hydrateOrfRow, type AssessmentValue, type AssessmentValueMap, type OrfResultRow } from "@/lib/sample-results";
 
 export type EntryRow = OrfResultRow & Record<string, AssessmentValue | AssessmentValueMap | undefined>;
@@ -58,9 +68,12 @@ function assignFieldValues(
   round: AssessmentRoundTemplate,
   context: AssessmentValueContext
 ) {
-  const sectionsForRound = sectionsForAssessmentRound(template, round);
+  const sectionsForRound = sectionsForAssessmentRound(template, round, context.grade);
   template.fields
-    .filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id))
+    .filter((field) =>
+      assessmentFieldAppliesToGrade(field, context.grade) &&
+      (!field.roundIds?.length || field.roundIds.includes(round.id))
+    )
     .forEach((field) => {
       const fieldSections = sectionsForField(template, round, field, sectionsForRound);
       if (fieldSections.length) {
@@ -88,6 +101,8 @@ export function entryValue(
   section?: AssessmentSectionTemplate,
   context: AssessmentValueContext = {}
 ) {
+  const provincialValue = provincialNormEntryValue(row, assessment, round, field, section, context);
+  if (typeof provincialValue !== "undefined") return provincialValue;
   if (isCalculatedAssessmentField(field) && hasScopedAssessmentContext(context)) {
     const importedOverride = storedAssessmentValue(row, assessment, round, field, section, context);
     if (typeof importedOverride !== "undefined") return importedOverride;
@@ -162,6 +177,120 @@ function percentageEntryValue(
   if (typeof score !== "number" || typeof total !== "number" || total === 0) return null;
 
   return Math.round((score / total) * 1000) / 10;
+}
+
+function provincialNormEntryValue(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  field: AssessmentFieldTemplate,
+  section: AssessmentSectionTemplate | undefined,
+  context: AssessmentValueContext
+): AssessmentValue | undefined {
+  const calculationKey = field.calculationKey;
+  if (calculationKey === "cc3_component_total") {
+    const norm = cc3NormFor(round.id, context.grade);
+    const component = cc3ComponentForCell(field, section);
+    return norm && component ? norm[component].max : null;
+  }
+  if (calculationKey === "cc3_requires_support") {
+    const norm = cc3NormFor(round.id, context.grade);
+    if (!norm) return null;
+    const scores = cc3Scores(row, assessment, round, context);
+    const requiresSupport = calculateCc3SupportFlag(norm, scores);
+    return requiresSupport == null ? null : Number(requiresSupport);
+  }
+  if (calculationKey === "provincial_numeracy_component_total") {
+    const norm = numeracyNormFor(round.id, context.grade);
+    const component = numeracyComponentForCell(field, section);
+    return norm?.components.find((item) => item.component === component)?.max ?? null;
+  }
+  if (
+    calculationKey === "provincial_numeracy_weighted_score" ||
+    calculationKey === "provincial_numeracy_requires_support"
+  ) {
+    const norm = numeracyNormFor(round.id, context.grade);
+    if (!norm) return null;
+    const weightedScore = calculateNumeracyWeightedScore(norm, numeracyScores(row, assessment, round, context));
+    if (weightedScore == null) return null;
+    return calculationKey === "provincial_numeracy_weighted_score"
+      ? weightedScore
+      : Number(weightedScore <= norm.weightedSupportMax);
+  }
+  return undefined;
+}
+
+function cc3Scores(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  context: AssessmentValueContext
+) {
+  const scores: Partial<Record<Cc3Component, number | null>> = {};
+  for (const component of ["regular_words", "irregular_words", "non_words"] as const) {
+    scores[component] = scoreForComponent(row, assessment, round, context, component, cc3ComponentForCell);
+  }
+  return scores;
+}
+
+function numeracyScores(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  context: AssessmentValueContext
+) {
+  const norm = numeracyNormFor(round.id, context.grade);
+  const scores: Partial<Record<NumeracyComponent, number | null>> = {};
+  norm?.components.forEach((item) => {
+    scores[item.component] = scoreForComponent(
+      row,
+      assessment,
+      round,
+      context,
+      item.component,
+      numeracyComponentForCell
+    );
+  });
+  return scores;
+}
+
+function scoreForComponent<TComponent extends string>(
+  row: OrfResultRow,
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  context: AssessmentValueContext,
+  component: TComponent,
+  componentForCell: (field: AssessmentFieldTemplate, section?: AssessmentSectionTemplate) => TComponent | null
+) {
+  const sections = sectionsForAssessmentRound(assessment, round, context.grade);
+  for (const field of assessment.fields) {
+    if (!assessmentFieldAppliesToGrade(field, context.grade) || assessmentFieldMeaning(field) !== "score") continue;
+    if (field.roundIds?.length && !field.roundIds.includes(round.id)) continue;
+    const fieldSections = sectionsForField(assessment, round, field, sections);
+    if (!fieldSections.length && componentForCell(field) === component) {
+      return storedAssessmentNumber(row, assessment, round, field, undefined, null, context);
+    }
+    const matchingSection = fieldSections.find((section) => componentForCell(field, section) === component);
+    if (matchingSection) {
+      return storedAssessmentNumber(row, assessment, round, field, matchingSection, null, context);
+    }
+  }
+  return null;
+}
+
+function configuredComponent(field: AssessmentFieldTemplate) {
+  const condition = field.calculationCondition;
+  if (!condition || typeof condition !== "object" || !("component" in condition)) return undefined;
+  const component = (condition as { component?: unknown }).component;
+  return typeof component === "string" ? component : undefined;
+}
+
+function cc3ComponentForCell(field: AssessmentFieldTemplate, section?: AssessmentSectionTemplate) {
+  return normalizeCc3Component(configuredComponent(field) ?? section?.name ?? field.groupLabel ?? field.name);
+}
+
+function numeracyComponentForCell(field: AssessmentFieldTemplate, section?: AssessmentSectionTemplate) {
+  return normalizeNumeracyComponent(configuredComponent(field) ?? section?.name ?? field.groupLabel ?? field.name);
 }
 
 function matchingCalculationInputField(
@@ -391,7 +520,7 @@ export function validateAssessmentTableEdit(
   newValue: unknown,
   context: AssessmentValueContext = {}
 ): AssessmentValueValidationResult {
-  const cell = findAssessmentCell(assessment, fieldName);
+  const cell = findAssessmentCell(assessment, fieldName, context);
   if (!cell) return { valid: false, value: null, error: "This assessment field is no longer available." };
   if (!isEditableAssessmentField(assessment, cell.field)) {
     return { valid: false, value: null, error: `${cell.field.name} cannot be edited.` };
@@ -437,7 +566,7 @@ export function updateAssessmentRowFromTableEdit(
   newValue: unknown,
   context: AssessmentValueContext = {}
 ) {
-  const cell = findAssessmentCell(assessment, fieldName);
+  const cell = findAssessmentCell(assessment, fieldName, context);
   if (!cell) return row;
 
   const validation = validateAssessmentTableEdit(row, assessment, fieldName, newValue, context);
@@ -489,7 +618,7 @@ function withoutCalculatedOverrides(
   context: AssessmentValueContext
 ) {
   const nextValues = { ...values };
-  const sectionsForRound = sectionsForAssessmentRound(assessment, round);
+  const sectionsForRound = sectionsForAssessmentRound(assessment, round, context.grade);
 
   assessment.fields
     .filter((field) => isCalculatedAssessmentField(field) && (!field.roundIds?.length || field.roundIds.includes(round.id)))
@@ -537,10 +666,17 @@ function legacyOrfFallback(row: OrfResultRow, round: AssessmentRoundTemplate, pa
   return null;
 }
 
-function findAssessmentCell(assessment: AssessmentTemplate, fieldName: string) {
+function findAssessmentCell(
+  assessment: AssessmentTemplate,
+  fieldName: string,
+  context: AssessmentValueContext = {}
+) {
   for (const round of assessment.rounds) {
-    const fieldsForRound = assessment.fields.filter((field) => !field.roundIds?.length || field.roundIds.includes(round.id));
-    const sectionsForRound = sectionsForAssessmentRound(assessment, round);
+    const fieldsForRound = assessment.fields.filter((field) =>
+      assessmentFieldAppliesToGrade(field, context.grade) &&
+      (!field.roundIds?.length || field.roundIds.includes(round.id))
+    );
+    const sectionsForRound = sectionsForAssessmentRound(assessment, round, context.grade);
     for (const field of fieldsForRound) {
       const fieldSections = sectionsForField(assessment, round, field, sectionsForRound);
       if (!fieldSections.length && assessmentValueKeys(assessment, round, field).includes(fieldName)) {
@@ -674,8 +810,22 @@ function assessmentFieldMeaning(field: AssessmentFieldTemplate) {
   return field.id || field.slug;
 }
 
-export function sectionsForAssessmentRound(assessment: AssessmentTemplate, round: AssessmentRoundTemplate) {
-  const matchingSections = (assessment.sections ?? []).filter((section) => section.roundIds.includes(round.id));
+export function assessmentFieldAppliesToGrade(field: AssessmentFieldTemplate, grade?: string | null) {
+  return !field.gradeIds?.length || !grade || field.gradeIds.includes(grade);
+}
+
+export function assessmentSectionAppliesToGrade(section: AssessmentSectionTemplate, grade?: string | null) {
+  return !section.gradeIds?.length || !grade || section.gradeIds.includes(grade);
+}
+
+export function sectionsForAssessmentRound(
+  assessment: AssessmentTemplate,
+  round: AssessmentRoundTemplate,
+  grade?: string | null
+) {
+  const matchingSections = (assessment.sections ?? []).filter((section) =>
+    section.roundIds.includes(round.id) && assessmentSectionAppliesToGrade(section, grade)
+  );
   if (matchingSections.length || assessment.id !== "orf") return matchingSections;
   return [
     { id: "passage-1", name: "1st passage", roundIds: [round.id] },
