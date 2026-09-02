@@ -121,7 +121,12 @@ import {
   type StudentPlacement,
   type StudentSearchOption
 } from "@/lib/overview-state";
-import { latestSchoolYear, resolveTeamMemberAccess, teamAssignmentHomerooms } from "@/lib/team-assignments";
+import {
+  SUPPORTED_GRADES,
+  latestSchoolYear,
+  resolveTeamMemberAccess,
+  teamAssignmentHomerooms
+} from "@/lib/team-assignments";
 import { firebaseApp } from "@/lib/firebase";
 import { prepareInvitationHandoff } from "@/lib/invitation-handoff";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
@@ -172,18 +177,18 @@ const predefinedCalculations = [
   },
   {
     key: ORF_PERCENTILE_CALCULATION_KEYS.fall,
-    label: "ORF %ile — Fall (test)",
-    description: "Applies provisional FastBridge 2019 fall thresholds for grades 3-8 when ORF MED is below 50."
+    label: "ORF %ile — Fall (2017 norms)",
+    description: "Applies Hasbrouck & Tindal 2017 fall anchors for Grades 2-6. The source has no Grade 1 fall norm."
   },
   {
     key: ORF_PERCENTILE_CALCULATION_KEYS.winter,
-    label: "ORF %ile — Winter (test)",
-    description: "Applies provisional FastBridge 2019 winter thresholds for grades 3-8 when ORF MED is below 50."
+    label: "ORF %ile — Winter (2017 norms)",
+    description: "Applies Hasbrouck & Tindal 2017 winter anchors for Grades 1-6 at every valid ORF MED."
   },
   {
     key: ORF_PERCENTILE_CALCULATION_KEYS.spring,
-    label: "ORF %ile — Spring (test)",
-    description: "Applies provisional FastBridge 2019 spring thresholds for grades 3-8 when ORF MED is below 50."
+    label: "ORF %ile — Spring (2017 norms)",
+    description: "Applies Hasbrouck & Tindal 2017 spring anchors for Grades 1-6 at every valid ORF MED."
   },
   {
     key: "quick_write_percentile",
@@ -3227,7 +3232,7 @@ function InlineEntryTable({
           <label>
             Grade
             <select disabled={scopeLocked} value={selectedGrade} onChange={(event) => onGradeChange(event.target.value)}>
-              {["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((grade) => (
+              {SUPPORTED_GRADES.map((grade) => (
                 <option key={grade} value={grade}>
                   Grade {grade}
                 </option>
@@ -3638,7 +3643,7 @@ function VpOverview({
                 onGradeChange(event.target.value);
               }}
             >
-              {["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((grade) => (
+              {SUPPORTED_GRADES.map((grade) => (
                 <option key={grade} value={grade}>
                   Grade {grade}
                 </option>
@@ -6214,7 +6219,7 @@ function OverviewImportModal({
           <label>
             Grade
             <select value={grade} onChange={(event) => setGrade(event.target.value)}>
-              {["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"].map((item) => (
+              {SUPPORTED_GRADES.map((item) => (
                 <option key={item} value={item}>
                   Grade {item}
                 </option>

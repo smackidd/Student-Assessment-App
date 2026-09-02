@@ -123,7 +123,7 @@ describe("assessment entry rows", () => {
     expect(entry[assessmentValueKey(orf, fall, percentile)]).toBeNull();
   });
 
-  it("applies the matching seasonal ORF percentile key below MED 50", () => {
+  it("applies the matching seasonal 2017 ORF percentile key", () => {
     const orf = assessmentTemplates.find((assessment) => assessment.id === "orf") as AssessmentTemplate;
     const context = { schoolYear: "2026-2027", grade: "3" };
     const wpm = orf.fields.find((field) => field.id === "wpm")!;
@@ -139,7 +139,7 @@ describe("assessment entry rows", () => {
     }
 
     const entry = buildEntryRows([row], orf, context)[0];
-    const expectedPercentiles = { fall: 14, winter: 7, spring: 5 } as const;
+    const expectedPercentiles = { fall: 10, winter: 1, spring: 1 } as const;
     for (const round of orf.rounds) {
       const percentile = orf.fields.find((field) => field.roundIds?.includes(round.id) && field.name === "%ile")!;
       expect(entry[assessmentValueKey(orf, round, percentile)])

@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { latestSchoolYear, resolveTeamMemberAccess, teamAssignmentHomerooms } from "@/lib/team-assignments";
+import {
+  SUPPORTED_GRADES,
+  latestSchoolYear,
+  resolveTeamMemberAccess,
+  teamAssignmentHomerooms
+} from "@/lib/team-assignments";
 
 describe("latestSchoolYear", () => {
   it("uses the newest year even when the saved list is out of order", () => {
@@ -8,6 +13,12 @@ describe("latestSchoolYear", () => {
 });
 
 describe("teamAssignmentHomerooms", () => {
+  it("includes Grades 1 and 2 in the available grade list", () => {
+    expect(SUPPORTED_GRADES.slice(0, 4)).toEqual(["1", "2", "3", "4"]);
+    expect(teamAssignmentHomerooms([], "2027-2028")["1"]).toEqual([]);
+    expect(teamAssignmentHomerooms([], "2027-2028")["2"]).toEqual([]);
+  });
+
   it("lists unique home rooms from only the selected year", () => {
     const placements = [
       { studentId: "a", schoolYear: "2027-2028", grade: "3", homeroom: "3B" },

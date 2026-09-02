@@ -796,7 +796,7 @@ function assessmentFieldMeaning(field: AssessmentFieldTemplate) {
   if (candidates.some((value) => value === "percentage" || value === "percent" || value === "pct")) return "percentage";
   if (candidates.some((value) =>
     value === "orf_percentile" ||
-    value.startsWith("orf_percentile_fastbridge2019_") ||
+    value.startsWith("orf_percentile_") ||
     value === "percentile" ||
     value === "ile"
   )) return "percentile";

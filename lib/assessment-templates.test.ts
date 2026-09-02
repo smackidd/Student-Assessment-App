@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { ORF_PERCENTILE_CALCULATION_KEYS } from "./orf-calculations";
+import {
+  LEGACY_ORF_PERCENTILE_CALCULATION_KEYS,
+  ORF_PERCENTILE_CALCULATION_KEYS
+} from "./orf-calculations";
 import {
   assessmentTemplates,
   normalizeAssessmentTemplates,
@@ -7,7 +10,7 @@ import {
 } from "./assessment-templates";
 
 describe("assessment template normalization", () => {
-  it("expands a saved legacy ORF percentile field into seasonal testing keys", () => {
+  it("expands a saved generic ORF percentile field into seasonal 2017 keys", () => {
     const currentOrf = assessmentTemplates.find((template) => template.id === "orf") as AssessmentTemplate;
     const legacyOrf: AssessmentTemplate = {
       ...currentOrf,
@@ -36,6 +39,23 @@ describe("assessment template normalization", () => {
       ORF_PERCENTILE_CALCULATION_KEYS.spring
     ]);
     expect(percentileFields.map((field) => field.roundIds)).toEqual([["fall"], ["winter"], ["spring"]]);
+    expect(normalized.gradeScope).toBe("Grades 1-6");
+  });
+
+  it("upgrades saved provisional seasonal ORF keys without losing their window", () => {
+    const currentOrf = assessmentTemplates.find((template) => template.id === "orf") as AssessmentTemplate;
+    const saved: AssessmentTemplate = {
+      ...currentOrf,
+      fields: currentOrf.fields.map((field) => field.roundIds?.includes("winter")
+        ? { ...field, calculationKey: LEGACY_ORF_PERCENTILE_CALCULATION_KEYS.winter }
+        : field)
+    };
+
+    const normalized = normalizeAssessmentTemplates([saved])[0];
+    const winterPercentile = normalized.fields.find((field) => field.roundIds?.includes("winter"));
+
+    expect(winterPercentile?.calculationKey).toBe(ORF_PERCENTILE_CALCULATION_KEYS.winter);
+    expect(winterPercentile?.roundIds).toEqual(["winter"]);
   });
 
   it("adds CC3 to older saved workspaces and keeps both normed assessments scoped to Grades 3 and 4", () => {

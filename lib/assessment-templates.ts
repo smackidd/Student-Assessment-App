@@ -1,4 +1,8 @@
-import { ORF_PERCENTILE_CALCULATION_KEYS, type OrfPercentileWindow } from "@/lib/orf-calculations";
+import {
+  ORF_PERCENTILE_CALCULATION_KEYS,
+  resolveOrfPercentileCalculationKey,
+  type OrfPercentileWindow
+} from "@/lib/orf-calculations";
 import {
   PROVINCIAL_NUMERACY_NORMS,
   type NumeracyComponent
@@ -161,7 +165,7 @@ export const assessmentTemplates: AssessmentTemplate[] = [
     name: "Oral Reading Fluency",
     category: "Literacy",
     description: "Tracks WPM, EPM, CWPM, median, and percentile across three passages per round.",
-    gradeScope: "Grades 3-12",
+    gradeScope: "Grades 1-6",
     rounds: defaultRounds,
     sections: [
       { id: "passage-1", name: "1st passage", roundIds: ["fall", "winter", "spring"] },
@@ -416,7 +420,7 @@ function normalizeTemplateAndYearDefinitions(template: AssessmentTemplate) {
 
 function normalizeSingleAssessmentTemplate(template: AssessmentTemplate): AssessmentTemplate {
   const normalizedTemplate = template.id === "orf"
-    ? { ...template, fields: normalizeLegacyOrfPercentileFields(template) }
+    ? { ...template, gradeScope: "Grades 1-6", fields: normalizeLegacyOrfPercentileFields(template) }
     : template;
 
   if (normalizedTemplate.id === "cc3") return normalizeCc3Template(normalizedTemplate);
@@ -606,21 +610,31 @@ function gradesForNumeracyComponent(componentName: NumeracyComponent) {
 
 function normalizeLegacyOrfPercentileFields(template: AssessmentTemplate) {
   return template.fields.flatMap((field) => {
-    if (field.calculationKey !== "orf_percentile") return [field];
+    if (field.calculationKey === "orf_percentile") {
+      const supportedRounds = template.rounds.filter((round) => {
+        const isSupportedWindow = round.id in ORF_PERCENTILE_CALCULATION_KEYS;
+        const isAssignedToField = !field.roundIds?.length || field.roundIds.includes(round.id);
+        return isSupportedWindow && isAssignedToField;
+      });
+      if (!supportedRounds.length) return [field];
 
-    const supportedRounds = template.rounds.filter((round) => {
-      const isSupportedWindow = round.id in ORF_PERCENTILE_CALCULATION_KEYS;
-      const isAssignedToField = !field.roundIds?.length || field.roundIds.includes(round.id);
-      return isSupportedWindow && isAssignedToField;
-    });
-    if (!supportedRounds.length) return [field];
+      return supportedRounds.map((round) => ({
+        ...field,
+        id: `${field.id}-${round.id}`,
+        slug: `${field.slug}-${round.id}`,
+        roundIds: [round.id],
+        calculationKey: ORF_PERCENTILE_CALCULATION_KEYS[round.id as OrfPercentileWindow]
+      }));
+    }
 
-    return supportedRounds.map((round) => ({
+    const seasonalWindow = (Object.keys(ORF_PERCENTILE_CALCULATION_KEYS) as OrfPercentileWindow[])
+      .find((window) => Boolean(resolveOrfPercentileCalculationKey(field.calculationKey, window)));
+    if (!seasonalWindow) return [field];
+
+    return [{
       ...field,
-      id: `${field.id}-${round.id}`,
-      slug: `${field.slug}-${round.id}`,
-      roundIds: [round.id],
-      calculationKey: ORF_PERCENTILE_CALCULATION_KEYS[round.id as OrfPercentileWindow]
-    }));
+      roundIds: [seasonalWindow],
+      calculationKey: ORF_PERCENTILE_CALCULATION_KEYS[seasonalWindow]
+    }];
   });
 }

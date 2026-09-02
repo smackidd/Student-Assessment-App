@@ -1,7 +1,7 @@
 import type { StudentPlacement } from "@/lib/overview-state";
 import type { TeamMember, UserRole } from "@/lib/organization-auth";
 
-const supportedGrades = ["3", "4", "5", "6", "7", "8", "9", "10", "11", "12"];
+export const SUPPORTED_GRADES = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"] as const;
 
 export function latestSchoolYear(schoolYears: string[]) {
   return [...schoolYears].sort((left, right) => schoolYearStart(right) - schoolYearStart(left))[0] ?? "";
@@ -9,7 +9,7 @@ export function latestSchoolYear(schoolYears: string[]) {
 
 export function teamAssignmentHomerooms(placements: StudentPlacement[], schoolYear: string) {
   const assignments: Record<string, string[]> = Object.fromEntries(
-    supportedGrades.map((grade) => [grade, []])
+    SUPPORTED_GRADES.map((grade) => [grade, []])
   );
   if (!schoolYear) return assignments;
 
