@@ -17,6 +17,12 @@ Authentication migrations include provider/configuration changes, blocking funct
 custom-claim shape changes, and bulk user transformations. Routine user sign-up and ordinary
 application data changes are not migrations.
 
+## Release migration assessments
+
+| Release | Application changes | Database and Authentication assessment | Test status | Production action |
+| --- | --- | --- | --- | --- |
+| `APP-093-20260904` | CC3 and Provincial Numeracy norms, 2017 seasonal ORF percentiles for Grades 1-6, and calculated ORF CWPM (`WPM - EPM`, minimum 0). | No Cloud SQL/Data Connect schema change, data transformation, Firebase Authentication change, or bulk rewrite is required. Existing saved ORF definitions are normalized by the application when loaded; they are persisted through the ordinary workspace save flow. | Pending isolated Test application deployment. | Application deployment only. No production database or Authentication migration command is required. |
+
 ## Migration list
 
 | ID | Area | Change | Test status and evidence | Production status and evidence | Rollback |
