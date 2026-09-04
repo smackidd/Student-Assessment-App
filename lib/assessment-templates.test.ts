@@ -58,6 +58,34 @@ describe("assessment template normalization", () => {
     expect(winterPercentile?.roundIds).toEqual(["winter"]);
   });
 
+  it("upgrades a saved editable ORF CWPM column to the calculated WPM minus EPM field", () => {
+    const currentOrf = assessmentTemplates.find((template) => template.id === "orf") as AssessmentTemplate;
+    const editableCwpm = currentOrf.fields.map((field) => field.id === "cwpm"
+      ? { ...field, dataType: "integer" as const, isCalculated: false, calculationKey: undefined }
+      : field);
+    const saved: AssessmentTemplate = {
+      ...currentOrf,
+      fields: editableCwpm,
+      yearDefinitions: {
+        "2025-2026": {
+          name: currentOrf.name,
+          description: currentOrf.description,
+          gradeScope: currentOrf.gradeScope,
+          rounds: currentOrf.rounds,
+          sections: currentOrf.sections,
+          fields: editableCwpm
+        }
+      }
+    };
+
+    const normalized = normalizeAssessmentTemplates([saved])[0];
+    const cwpm = normalized.fields.find((field) => field.id === "cwpm");
+    const savedYearCwpm = normalized.yearDefinitions?.["2025-2026"].fields.find((field) => field.id === "cwpm");
+
+    expect(cwpm).toMatchObject({ dataType: "calculated", isCalculated: true, calculationKey: "orf_cwpm" });
+    expect(savedYearCwpm).toMatchObject({ dataType: "calculated", isCalculated: true, calculationKey: "orf_cwpm" });
+  });
+
   it("adds CC3 to older saved workspaces and keeps both normed assessments scoped to Grades 3 and 4", () => {
     const olderTemplates = assessmentTemplates.filter((template) => template.id !== "cc3");
     const normalized = normalizeAssessmentTemplates(olderTemplates);

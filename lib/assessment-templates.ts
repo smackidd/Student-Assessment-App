@@ -420,7 +420,7 @@ function normalizeTemplateAndYearDefinitions(template: AssessmentTemplate) {
 
 function normalizeSingleAssessmentTemplate(template: AssessmentTemplate): AssessmentTemplate {
   const normalizedTemplate = template.id === "orf"
-    ? { ...template, gradeScope: "Grades 1-6", fields: normalizeLegacyOrfPercentileFields(template) }
+    ? normalizeOrfTemplate(template)
     : template;
 
   if (normalizedTemplate.id === "cc3") return normalizeCc3Template(normalizedTemplate);
@@ -446,6 +446,30 @@ function normalizeSingleAssessmentTemplate(template: AssessmentTemplate): Assess
         : field;
     })
   };
+}
+
+function normalizeOrfTemplate(template: AssessmentTemplate): AssessmentTemplate {
+  return {
+    ...template,
+    gradeScope: "Grades 1-6",
+    fields: normalizeLegacyOrfPercentileFields(template).map((field) =>
+      isOrfCwpmField(field)
+        ? {
+            ...field,
+            dataType: "calculated" as const,
+            isCalculated: true,
+            calculationKey: "orf_cwpm"
+          }
+        : field
+    )
+  };
+}
+
+function isOrfCwpmField(field: AssessmentFieldTemplate) {
+  return [field.calculationKey, field.slug, field.id, field.name]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, ""))
+    .some((value) => value === "orf_cwpm" || value === "cwpm");
 }
 
 function assessmentDefinitionSnapshot(template: AssessmentTemplate): AssessmentDefinitionSnapshot {

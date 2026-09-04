@@ -176,6 +176,11 @@ const predefinedCalculations = [
     description: "Calculates the MED of all CWPM values for the current window."
   },
   {
+    key: "orf_cwpm",
+    label: "ORF CWPM (WPM − EPM)",
+    description: "Subtracts EPM from WPM for the matching ORF passage. Results cannot be less than zero."
+  },
+  {
     key: ORF_PERCENTILE_CALCULATION_KEYS.fall,
     label: "ORF %ile — Fall (2017 norms)",
     description: "Applies Hasbrouck & Tindal 2017 fall anchors for Grades 2-6. The source has no Grade 1 fall norm."
