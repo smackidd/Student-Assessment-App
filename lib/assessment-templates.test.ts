@@ -99,6 +99,30 @@ describe("assessment template normalization", () => {
       .toBe("checkbox");
   });
 
+  it("removes the legacy Custom CC3 definition while keeping the Literacy CC3 definition", () => {
+    const literacyCc3 = assessmentTemplates.find((template) => template.id === "cc3")!;
+    const customCc3: AssessmentTemplate = {
+      ...literacyCc3,
+      id: "custom-7",
+      category: "Custom",
+      fields: literacyCc3.fields.slice(0, 2)
+    };
+    const spelling: AssessmentTemplate = {
+      ...literacyCc3,
+      id: "custom-6",
+      name: "Spelling",
+      category: "Custom"
+    };
+
+    const normalized = normalizeAssessmentTemplates([customCc3, spelling]);
+
+    expect(normalized.some((template) => template.id === "custom-7")).toBe(false);
+    expect(normalized.filter((template) => template.name === "CC3")).toEqual([
+      expect.objectContaining({ id: "cc3", category: "Literacy" })
+    ]);
+    expect(normalized.some((template) => template.id === "custom-6" && template.name === "Spelling")).toBe(true);
+  });
+
   it("upgrades a sectioned spreadsheet-import numeracy definition without changing its existing section ids", () => {
     const currentNumeracy = assessmentTemplates.find((template) => template.id === "ab-ed-numeracy")!;
     const legacyNumeracy: AssessmentTemplate = {

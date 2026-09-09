@@ -392,7 +392,9 @@ export const emptyCustomTemplate: AssessmentTemplate = {
 };
 
 export function normalizeAssessmentTemplates(templates: AssessmentTemplate[]) {
-  const normalized = templates.map((template) => normalizeTemplateAndYearDefinitions(template));
+  const normalized = templates
+    .filter((template) => !isLegacyCustomCc3Template(template))
+    .map((template) => normalizeTemplateAndYearDefinitions(template));
 
   for (const requiredId of ["cc3", "ab-ed-numeracy"]) {
     if (normalized.some((template) => template.id === requiredId)) continue;
@@ -400,6 +402,12 @@ export function normalizeAssessmentTemplates(templates: AssessmentTemplate[]) {
     if (defaultTemplate) normalized.push(defaultTemplate);
   }
   return normalized;
+}
+
+export function isLegacyCustomCc3Template(template: AssessmentTemplate) {
+  return template.id !== "cc3"
+    && template.category.trim().toLowerCase() === "custom"
+    && template.name.trim().toLowerCase() === "cc3";
 }
 
 function normalizeTemplateAndYearDefinitions(template: AssessmentTemplate) {
