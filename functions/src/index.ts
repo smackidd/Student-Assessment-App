@@ -7,6 +7,14 @@ import { defineString } from "firebase-functions/params";
 import { beforeUserCreated, beforeUserSignedIn, HttpsError as IdentityHttpsError } from "firebase-functions/v2/identity";
 import { HttpsError, onCall, type CallableRequest } from "firebase-functions/v2/https";
 import {
+  blockingSignInProvider,
+  googleAuthMethod,
+  googleInvitationAccessError,
+  googleWorkspaceProfileError,
+  isSchoolEmail,
+  normalizeEmail
+} from "./google-auth-policy.js";
+import {
   ImportRollbackError,
   planImportRollback,
   type ImportRollbackPlan
@@ -141,8 +149,24 @@ export const blockUninvitedSignIn = beforeUserSignedIn({ region }, (event) => {
   const user = event.data;
   const email = normalizeEmail(user?.email);
   const claims = user?.customClaims ?? {};
+  const signInError = googleInvitationAccessError(claims, {
+    email: user?.email,
+    emailVerified: user?.emailVerified,
+    provider: blockingSignInProvider(event)
+  });
+  if (signInError) throw new IdentityHttpsError("permission-denied", signInError);
+  const profileError = googleWorkspaceProfileError(claims, event.additionalUserInfo?.profile);
+  if (profileError) throw new IdentityHttpsError("permission-denied", profileError);
 
-  if (email && email === normalizeEmail(initialAdminEmail.value())) {
+  // An existing role takes precedence over bootstrap configuration, including
+  // when the configured initial administrator was later assigned another role.
+  if (claims.organizationId === organizationId && isOrganizationRole(claims.role)) return;
+
+  if (
+    claims.authMethod !== googleAuthMethod &&
+    !claims.organizationId &&
+    email && email === normalizeEmail(initialAdminEmail.value())
+  ) {
     return {
       customClaims: {
         ...claims,
@@ -152,14 +176,10 @@ export const blockUninvitedSignIn = beforeUserSignedIn({ region }, (event) => {
     };
   }
 
-  if (claims.organizationId !== organizationId || !isOrganizationRole(claims.role)) {
-    throw new IdentityHttpsError(
-      "permission-denied",
-      "An administrator has not invited this account to the organization."
-    );
-  }
-
-  return;
+  throw new IdentityHttpsError(
+    "permission-denied",
+    "An administrator has not invited this account to the organization."
+  );
 });
 
 export const initializeOrganizationAccess = onCall({ region }, async (request) => {
@@ -170,7 +190,11 @@ export const initializeOrganizationAccess = onCall({ region }, async (request) =
   }
 
   const email = normalizeEmail(auth.email);
-  if (!email || email !== normalizeEmail(initialAdminEmail.value())) {
+  if (
+    auth.authMethod === googleAuthMethod ||
+    auth.organizationId ||
+    !email || email !== normalizeEmail(initialAdminEmail.value())
+  ) {
     return { active: false };
   }
 
@@ -192,6 +216,9 @@ export const inviteUser = onCall(
     requireAdmin(request);
 
     const email = requiredEmail(request.data.email);
+    if (!isSchoolEmail(email)) {
+      throw new HttpsError("invalid-argument", "Invite a foothillsacademy.org email address.");
+    }
     const displayName = requiredText(request.data.displayName, "name");
     const role = requiredRole(request.data.role);
     let user: UserRecord;
@@ -213,23 +240,24 @@ export const inviteUser = onCall(
         email,
         displayName,
         emailVerified: false,
-        disabled: false,
-        password: randomBytes(48).toString("base64url")
+        disabled: false
       });
     }
 
     await getAuth().setCustomUserClaims(user.uid, {
       ...user.customClaims,
       organizationId,
-      role
+      role,
+      authMethod: googleAuthMethod,
+      invitedEmail: email
     });
+    // Pending legacy invitations may already have password-reset links or
+    // sessions. Reissuing an invitation must enforce the new policy immediately.
+    await getAuth().revokeRefreshTokens(user.uid);
 
     const invitationReturnUrl = new URL(applicationUrl.value());
-    invitationReturnUrl.searchParams.set("invited", "1");
-    const actionLink = await getAuth().generatePasswordResetLink(email, {
-      url: invitationReturnUrl.toString(),
-      handleCodeInApp: false
-    });
+    invitationReturnUrl.searchParams.set("invited", "google");
+    const actionLink = invitationReturnUrl.toString();
     await queueInvitationEmail({ email, displayName, role, actionLink });
 
     const refreshedUser = await getAuth().getUser(user.uid);
@@ -510,7 +538,14 @@ export const deleteOrganizationUser = onCall(
 
 function requireSignedIn(request: CallableRequest<unknown>) {
   if (!request.auth) throw new HttpsError("unauthenticated", "Sign in is required.");
-  return request.auth.token;
+  const token = request.auth.token;
+  const signInError = googleInvitationAccessError(token, {
+    email: token.email,
+    emailVerified: token.email_verified,
+    provider: token.firebase?.sign_in_provider
+  });
+  if (signInError) throw new HttpsError("permission-denied", signInError);
+  return token;
 }
 
 function requireAdmin(request: CallableRequest<unknown>) {
@@ -757,10 +792,6 @@ function requiredAuditEventId(value: unknown) {
   return id;
 }
 
-function normalizeEmail(value: unknown) {
-  return typeof value === "string" ? value.trim().toLowerCase() : "";
-}
-
 function isAuthUserNotFound(error: unknown) {
   return (
     typeof error === "object" &&
@@ -852,7 +883,8 @@ async function queueInvitationEmail(input: {
           `Hello ${input.displayName},`,
           "",
           `An Admin invited you to ${organizationName.value()} as ${roleLabel(input.role)}.`,
-          "Use the secure link below to set your password. The link is single-use and expires automatically.",
+          `Open the app below and choose Sign in with Google using ${input.email}.`,
+          "Your invitation only accepts this foothillsacademy.org Google account. You do not need to create a password.",
           "",
           input.actionLink,
           "",
@@ -873,6 +905,7 @@ async function queueInvitationEmail(input: {
 }
 
 function invitationHtml(input: {
+  email: string;
   displayName: string;
   role: OrganizationRole;
   actionLink: string;
@@ -882,10 +915,11 @@ function invitationHtml(input: {
       <h1 style="font-size:28px">${escapeHtml(organizationName.value())}</h1>
       <p>Hello ${escapeHtml(input.displayName)},</p>
       <p>An Admin invited you as <strong>${escapeHtml(roleLabel(input.role))}</strong>.</p>
-      <p>Set your password using the secure, single-use link below:</p>
+      <p>Open the app and choose <strong>Sign in with Google</strong> using <strong>${escapeHtml(input.email)}</strong>.</p>
+      <p>Your invitation only accepts this foothillsacademy.org Google account. You do not need to create a password.</p>
       <p style="margin:28px 0">
         <a href="${escapeHtml(input.actionLink)}" style="background:#111923;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none;font-weight:700">
-          Set password
+          Open app
         </a>
       </p>
       <p style="font-size:13px;color:#5f6874">If you were not expecting this invitation, you can ignore this email.</p>

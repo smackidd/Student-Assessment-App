@@ -77,6 +77,7 @@ export async function resolveOrganizationAccess(user: User) {
   }
 
   return {
+    googleOnly: token.claims.authMethod === "google",
     access: active ? ("active" as const) : ("uninvited" as const),
     role,
     grade,

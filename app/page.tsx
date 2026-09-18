@@ -34,8 +34,6 @@ import {
   getAuth,
   onIdTokenChanged,
   reauthenticateWithCredential,
-  sendPasswordResetEmail,
-  signInWithEmailAndPassword,
   signOut,
   updatePassword,
   updateProfile,
@@ -128,7 +126,9 @@ import {
   teamAssignmentHomerooms
 } from "@/lib/team-assignments";
 import { firebaseApp } from "@/lib/firebase";
-import { prepareInvitationHandoff } from "@/lib/invitation-handoff";
+import { AuthScreen } from "@/components/auth-screen";
+import { isSchoolEmail, schoolEmailDomain } from "@/lib/google-sign-in";
+import { prepareInvitationHandoff, type InvitationSignInMethod } from "@/lib/invitation-handoff";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
 import { studentRowsNeedingSqlSync } from "@/lib/student-sync";
 import {
@@ -273,7 +273,8 @@ type OverviewDialog =
 export default function StudentEvaluationApp() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [invitationHandoffComplete, setInvitationHandoffComplete] = useState(false);
+  const [googleOnlyAccount, setGoogleOnlyAccount] = useState(false);
+  const [invitationSignInMethod, setInvitationSignInMethod] = useState<InvitationSignInMethod | null>(null);
   const [templates, setTemplates] = useState<AssessmentTemplate[]>(assessmentTemplates);
   const [selectedId, setSelectedId] = useState(assessmentTemplates[0].id);
   const [activeView, setActiveView] = useState<AppView>("overview");
@@ -459,7 +460,7 @@ export default function StudentEvaluationApp() {
         signOutCurrentUser: () => signOut(auth),
         replaceUrl: (url) => window.history.replaceState({}, "", url)
       });
-      if (invitationHandoff) setInvitationHandoffComplete(true);
+      if (invitationHandoff) setInvitationSignInMethod(invitationHandoff);
 
       if (cancelled) return;
       unsubscribe = onIdTokenChanged(auth, async (user) => {
@@ -475,6 +476,7 @@ export default function StudentEvaluationApp() {
         setAuthUser(user);
         if (accountChanged) {
           setAuthReady(false);
+          setGoogleOnlyAccount(false);
           setOrganizationAccess("checking");
           setWorkspaceReadyForUid(null);
           setNavigationReadyForUid(null);
@@ -511,6 +513,7 @@ export default function StudentEvaluationApp() {
           const membership = await resolveOrganizationAccess(user);
           if (!isCurrentSession()) return;
           setOrganizationAccess(membership.access);
+          setGoogleOnlyAccount(membership.googleOnly);
           if (!membership.role) setTeamMembers([]);
           if (membership.role) {
             setCurrentUserRole(membership.role);
@@ -1677,7 +1680,7 @@ export default function StudentEvaluationApp() {
   }
 
   if (!authUser) {
-    return <AuthScreen invitationHandoffComplete={invitationHandoffComplete} />;
+    return <AuthScreen invitationSignInMethod={invitationSignInMethod} />;
   }
 
   if (organizationAccess === "uninvited") {
@@ -1936,6 +1939,7 @@ export default function StudentEvaluationApp() {
           <ReportFiles rows={orfRows} reports={uploadedReports} setReports={setUploadedReports} recordAudit={recordAudit} />
         ) : activeView === "profile" ? (
           <ProfilePage
+            googleOnlyAccount={googleOnlyAccount}
             isAdmin={isAdmin}
             activeTab={profilePageTab}
             setActiveTab={setProfilePageTab}
@@ -2117,110 +2121,6 @@ type UploadedReport = {
   fileSize: number;
   storagePath: string;
 };
-
-function AuthScreen({ invitationHandoffComplete }: { invitationHandoffComplete: boolean }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [authMessage, setAuthMessage] = useState("");
-  const [action, setAction] = useState<"signin" | "reset" | null>(null);
-
-  async function submitAuth(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAction("signin");
-    setAuthMessage("");
-
-    try {
-      await signInWithEmailAndPassword(getAuth(firebaseApp), email.trim(), password);
-    } catch (error) {
-      setAuthMessage(friendlyAuthError(error));
-    } finally {
-      setAction(null);
-    }
-  }
-
-  async function resetPassword() {
-    if (!email.trim()) {
-      setAuthMessage("Enter your invited email address first.");
-      return;
-    }
-
-    setAction("reset");
-    setAuthMessage("");
-    try {
-      await sendPasswordResetEmail(getAuth(firebaseApp), email.trim());
-      setAuthMessage("If that invited account exists, Firebase has sent a password reset email.");
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      setAuthMessage(
-        message.includes("auth/operation-not-allowed")
-          ? "Email/password sign-in is not enabled in Firebase yet."
-          : "If that invited account exists, Firebase has sent a password reset email."
-      );
-    } finally {
-      setAction(null);
-    }
-  }
-
-  return (
-    <main className="auth-shell">
-      <section className="auth-card panel">
-        <div>
-          <p className="eyebrow">Student Evaluations</p>
-          <h1>Sign in</h1>
-          <p>Accounts are created by an administrator. Use the email address from your invitation.</p>
-        </div>
-
-        {invitationHandoffComplete ? (
-          <div className="auth-message">
-            Your password is set. The previous account was signed out; sign in with your new credentials.
-          </div>
-        ) : null}
-
-        <form className="auth-form" onSubmit={submitAuth}>
-          <label>
-            Email
-            <input
-              autoComplete="email"
-              required
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@school.ca"
-            />
-          </label>
-
-          <label>
-            Password
-            <input
-              autoComplete="current-password"
-              minLength={6}
-              required
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="At least 6 characters"
-            />
-          </label>
-
-          {authMessage ? <div className="auth-message">{authMessage}</div> : null}
-
-          <button className="primary-action" disabled={action !== null} type="submit">
-            {action === "signin" ? "Signing in..." : "Sign in"}
-          </button>
-        </form>
-
-        <button
-          className="auth-switch"
-          disabled={action !== null}
-          onClick={resetPassword}
-          type="button"
-        >
-          {action === "reset" ? "Sending reset email..." : "Forgot password?"}
-        </button>
-      </section>
-    </main>
-  );
-}
 
 function PendingInviteScreen({ email, onSignOut }: { email: string; onSignOut: () => void }) {
   return (
@@ -4591,6 +4491,7 @@ function uniqueDashboardRounds(assessments: AssessmentTemplate[]) {
 }
 
 function ProfilePage({
+  googleOnlyAccount,
   isAdmin,
   activeTab,
   setActiveTab,
@@ -4614,6 +4515,7 @@ function ProfilePage({
   saveMessage,
   onSave
 }: {
+  googleOnlyAccount: boolean;
   isAdmin: boolean;
   activeTab: ProfilePageTab;
   setActiveTab: (tab: ProfilePageTab) => void;
@@ -4689,6 +4591,7 @@ function ProfilePage({
   }
 
   async function changePassword() {
+    if (googleOnlyAccount) return;
     if (!authUser?.email) {
       setPasswordStatus("error");
       setPasswordMessage("Sign in with an email account before changing your password.");
@@ -4738,7 +4641,7 @@ function ProfilePage({
           Profile
         </button>
         <button className={visibleTab === "password" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("password")} type="button">
-          Change Password
+          {googleOnlyAccount ? "Account security" : "Change Password"}
         </button>
         {isAdmin ? (
           <>
@@ -4787,7 +4690,12 @@ function ProfilePage({
         </div>
       ) : null}
 
-      {visibleTab === "password" ? (
+      {visibleTab === "password" && googleOnlyAccount ? (
+        <section className="panel">
+          <h2>Google account security</h2>
+          <p>You sign in with your school Google account. Manage your password through Google or contact your school administrator.</p>
+        </section>
+      ) : visibleTab === "password" ? (
         <div className="panel profile-form password-form">
           <label>
             Current password
@@ -4978,9 +4886,11 @@ function InviteModal({
   const [role, setRole] = useState<UserRole>("Teacher / EA");
   const [status, setStatus] = useState<"idle" | "sending" | "error">("idle");
   const [message, setMessage] = useState("");
-  const inviteReady = Boolean(email.trim() && name.trim());
+  const validSchoolEmail = isSchoolEmail(email);
+  const inviteReady = Boolean(validSchoolEmail && name.trim());
 
   async function sendInvite() {
+    if (!inviteReady) return;
     setStatus("sending");
     setMessage("");
     try {
@@ -5020,7 +4930,9 @@ function InviteModal({
               type="email"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@school.ca"
+              placeholder={`name@${schoolEmailDomain}`}
+              aria-invalid={Boolean(email.trim() && !validSchoolEmail)}
+              aria-describedby="invite-domain-help"
             />
           </label>
           <label>
@@ -5034,8 +4946,8 @@ function InviteModal({
             </select>
           </label>
         </div>
-        <p className="invite-explainer">
-          Firebase will email a single-use link so this user can set their own password. No temporary password is sent.
+        <p className="invite-explainer" id="invite-domain-help">
+          Invite a {schoolEmailDomain} email address. The user will receive an invitation to sign in with that school Google account. No app password is needed.
         </p>
         {message ? <div className="auth-message">{message}</div> : null}
         <div className="modal-actions">

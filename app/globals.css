@@ -329,6 +329,22 @@ textarea {
   color: var(--muted);
 }
 
+.auth-card > .primary-action {
+  width: 100%;
+  margin: 16px 0;
+}
+
+.legacy-signin {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.legacy-signin summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
 .unauthorized-card {
   text-align: center;
 }
@@ -364,6 +380,12 @@ textarea {
   color: #8a1f1f;
   font-size: 0.9rem;
   font-weight: 800;
+}
+
+.auth-message.invitation-message {
+  border-color: #b8d8cd;
+  background: #edf7f3;
+  color: #235846;
 }
 
 .auth-switch {

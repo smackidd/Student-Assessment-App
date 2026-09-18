@@ -14,8 +14,35 @@ describe("prepareInvitationHandoff", () => {
       replaceUrl
     });
 
-    expect(handled).toBe(true);
+    expect(handled).toBe("password");
     expect(calls).toEqual(["ready", "signout", "replace:/?source=email#signin"]);
+  });
+
+  it("identifies Google invitations separately from previously sent password links", async () => {
+    const replaceUrl = vi.fn();
+    const signOutCurrentUser = vi.fn(async () => {});
+    const handled = await prepareInvitationHandoff({
+      href: "http://localhost:3058/?invited=google&source=email",
+      waitForAuthReady: async () => {},
+      hasCurrentUser: () => false,
+      signOutCurrentUser,
+      replaceUrl
+    });
+    expect(handled).toBe("google");
+    expect(replaceUrl).toHaveBeenCalledWith("/?source=email");
+    expect(signOutCurrentUser).not.toHaveBeenCalled();
+  });
+
+  it("retains the handoff and refuses to continue when the previous account cannot sign out", async () => {
+    const replaceUrl = vi.fn();
+    await expect(prepareInvitationHandoff({
+      href: "http://localhost:3058/?invited=google",
+      waitForAuthReady: async () => {},
+      hasCurrentUser: () => true,
+      signOutCurrentUser: async () => { throw new Error("Sign-out failed"); },
+      replaceUrl
+    })).rejects.toThrow("Sign-out failed");
+    expect(replaceUrl).not.toHaveBeenCalled();
   });
 
   it("does nothing when the invitation marker is absent", async () => {

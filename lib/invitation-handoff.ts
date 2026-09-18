@@ -6,6 +6,8 @@ type InvitationHandoffDependencies = {
   replaceUrl: (url: string) => void;
 };
 
+export type InvitationSignInMethod = "google" | "password";
+
 export async function prepareInvitationHandoff({
   href,
   waitForAuthReady,
@@ -14,12 +16,13 @@ export async function prepareInvitationHandoff({
   replaceUrl
 }: InvitationHandoffDependencies) {
   const currentUrl = new URL(href);
-  if (currentUrl.searchParams.get("invited") !== "1") return false;
+  const invitation = currentUrl.searchParams.get("invited");
+  if (invitation !== "1" && invitation !== "google") return false;
 
   await waitForAuthReady();
   if (hasCurrentUser()) await signOutCurrentUser();
 
   currentUrl.searchParams.delete("invited");
   replaceUrl(`${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
-  return true;
+  return invitation === "google" ? "google" as const : "password" as const;
 }
