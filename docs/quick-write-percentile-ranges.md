@@ -1,0 +1,11 @@
+# Quick Write percentile range decision
+
+The project owner's 2025-26 CBM workbooks in `project-resources/Lindseys spreadsheets/_CBM Tracking Spreadsheets 25-26` show Quick Write `%ile` as labels such as `<1%`, `1-19%`, and `20-39%`. Grades 3-4 have entered examples, but no `%ile` formulas or complete grade/window cutoff table. Grades 5-9 have empty `%ile` cells, and Grades 10-12 have no `%ile` column. The entered examples cannot determine an official CWS-to-percentile lookup across all grades and windows.
+
+For local testing, the existing `quick_write_percentile` calculation continues to rank CWS within the current school-year, grade, and assessment-window cohort. Its result is now displayed as a range: `<1%`, `1-19%`, `20-39%`, `40-59%`, `60-79%`, `80-99%`, or `>99%`. Every live-calculated value includes the visible suffix `(cohort est.)`, because it does **not** represent the workbook's grade/window norm classification. The banding uses the unrounded midrank percentile so values just below 1% remain in `<1%`. A missing CWS still leaves `%ile` blank. The higher bands extend the workbook's observed 20-point label pattern for testing; they were not supplied as official cutoffs.
+
+An imported workbook `%ile` range is retained without the suffix as the authoritative source value for that student, year, grade, and window. Editing a source input removes that imported calculated override and recomputes the visibly marked provisional cohort range. This can legitimately differ greatly from the imported norm label. The calculated field remains read-only. A future school-approved norm table can replace the cohort calculation without changing the `quick_write_percentile` key.
+
+ORF is unchanged. The supplied `2017_ORF_NORMS.pdf` gives discrete Hasbrouck & Tindal CWPM anchors at P10, P25, P50, P75, and P90, but does not prescribe percentile-range labels. The existing ORF calculation therefore continues to display its documented single published anchor (or P1 below P10), rather than Quick Write's range convention. See `docs/orf-percentile-source-decision.md`.
+
+This is application-only work. No Cloud SQL/Data Connect schema, data migration, Firebase Authentication change, or bulk rewrite is required. Nothing in this branch is deployed to Test or Production.

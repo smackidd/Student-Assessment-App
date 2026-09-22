@@ -20,6 +20,10 @@ import {
   type Cc3Component,
   type NumeracyComponent
 } from "@/lib/provincial-screening-norms";
+import {
+  normalizeQuickWritePercentileRange,
+  quickWriteEstimatedPercentileRange
+} from "@/lib/quick-write-percentile";
 import { hydrateOrfRow, type AssessmentValue, type AssessmentValueMap, type OrfResultRow } from "@/lib/sample-results";
 
 export type EntryRow = OrfResultRow & Record<string, AssessmentValue | AssessmentValueMap | undefined>;
@@ -105,7 +109,11 @@ export function entryValue(
   if (typeof provincialValue !== "undefined") return provincialValue;
   if (isCalculatedAssessmentField(field) && hasScopedAssessmentContext(context)) {
     const importedOverride = storedAssessmentValue(row, assessment, round, field, section, context);
-    if (typeof importedOverride !== "undefined") return importedOverride;
+    if (typeof importedOverride !== "undefined") {
+      return assessmentFieldMeaning(field) === "quick_write_percentile"
+        ? normalizeQuickWritePercentileRange(importedOverride)
+        : importedOverride;
+    }
   }
   if (assessment.id === "orf" && field.isCalculated) {
     return orfEntryValue(row, assessment, round, field, section, context);
@@ -149,14 +157,15 @@ function quickWriteEntryValue(
     .map((cohortRow) => storedAssessmentNumber(cohortRow, assessment, round, cwsField, section, null, context))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
 
-  return calculatePercentileRank(cws, cohortScores);
+  const percentileRank = calculatePercentileRank(cws, cohortScores);
+  return percentileRank == null ? null : quickWriteEstimatedPercentileRange(percentileRank);
 }
 
 function calculatePercentileRank(score: number, cohortScores: number[]) {
   if (!cohortScores.length) return null;
   const below = cohortScores.filter((value) => value < score).length;
   const equal = cohortScores.filter((value) => value === score).length;
-  return Math.round(((below + equal / 2) / cohortScores.length) * 100);
+  return ((below + equal / 2) / cohortScores.length) * 100;
 }
 
 function percentageEntryValue(
@@ -457,6 +466,13 @@ export function validateAssessmentValue(
 ): AssessmentValueValidationResult {
   if (value === null || typeof value === "undefined" || (typeof value === "string" && value.trim() === "")) {
     return { valid: true, value: null, error: null };
+  }
+
+  if (assessmentFieldMeaning(field) === "quick_write_percentile") {
+    const percentileRange = normalizeQuickWritePercentileRange(value);
+    return percentileRange
+      ? { valid: true, value: percentileRange, error: null }
+      : { valid: false, value: null, error: `${field.name} must be a percentile from 0 to 100 or a supported range.` };
   }
 
   if (field.dataType !== "integer" && field.dataType !== "percentage" && field.dataType !== "calculated") {

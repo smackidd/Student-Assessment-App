@@ -197,8 +197,8 @@ const predefinedCalculations = [
   },
   {
     key: "quick_write_percentile",
-    label: "Quick Write %ile",
-    description: "Percentile-ranks Quick Write CWS within the current year, grade, and assessment window cohort."
+    label: "Quick Write %ile range",
+    description: "Estimates a CWS percentile range (<1%, 1-19%, 20-39%, etc.) within the current year, grade, and assessment window cohort. Live results are marked '(cohort est.)'; imported workbook ranges take precedence. Official grade/window cutoffs were not supplied."
   },
   {
     key: "percentage",
@@ -7288,12 +7288,19 @@ function fieldColumn(
     : undefined;
   return {
     colId: fieldName,
-    headerName: field.name,
+    headerName: assessment.id === "quick-write" && field.calculationKey === "quick_write_percentile"
+      ? "%ile range"
+      : field.name,
+    headerTooltip: assessment.id === "quick-write" && field.calculationKey === "quick_write_percentile"
+      ? "Estimated CWS cohort-percentile range; imported workbook values take precedence. Not an official norm."
+      : undefined,
     headerComponent: DefaultValueHeader,
     headerComponentParams: {
       onOpenDefaultValue: canBulkDefault && openDefaultValuePopup ? () => openDefaultValuePopup(defaultValueTarget) : undefined
     },
-    width: field.name.length > 12 ? 150 : 104,
+    width: assessment.id === "quick-write" && field.calculationKey === "quick_write_percentile"
+      ? 190
+      : field.name.length > 12 ? 150 : 104,
     cellDataType: usesScaleCodeEditor ? false : undefined,
     editable,
     singleClickEdit: usesScaleCodeEditor,
@@ -7418,7 +7425,12 @@ function overviewColumnsFor(template: AssessmentTemplate): ColDef<EntryRow>[] {
   if (template.id === "quick-write") {
     return [
       { field: "quick_write_tww", headerName: "TWW", width: 100 },
-      { field: "quick_write_percentile", headerName: "%ile", width: 100 }
+      {
+        field: "quick_write_percentile",
+        headerName: "%ile range",
+        headerTooltip: "Estimated CWS cohort-percentile range; imported workbook values take precedence. Not an official norm.",
+        width: 190
+      }
     ];
   }
   if (template.id === "ab-ed-numeracy") {

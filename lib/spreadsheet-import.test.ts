@@ -100,6 +100,34 @@ describe("spreadsheet assessment imports", () => {
     expect(result.row.assessmentValues?.[fieldName]).toBeUndefined();
   });
 
+  it("preserves imported Quick Write percentile bands over provisional cohort ranks", () => {
+    const assessment = assessmentTemplates.find((template) => template.id === "quick-write") as AssessmentTemplate;
+    const round = assessment.rounds[0];
+    const cws = assessment.fields.find((field) => field.id === "cws")!;
+    const percentile = assessment.fields.find((field) => field.id === "quick-write-percentile")!;
+    const context = { schoolYear: "2025-2026", grade: "4" };
+    const percentileKey = assessmentValueKey(assessment, round, percentile);
+    const cells: SpreadsheetAssessmentCell[] = [
+      { value: 18, match: { assessment, round, field: cws, fieldName: assessmentValueKey(assessment, round, cws) } },
+      { value: "20-39%", match: { assessment, round, field: percentile, fieldName: percentileKey } }
+    ];
+
+    const result = applySpreadsheetAssessmentValues(emptyRow(), cells, context);
+    const entry = buildEntryRows([result.row], assessment, context)[0];
+    expect(result.validationErrors).toEqual([]);
+    expect(result.importedValueCount).toBe(2);
+    expect(entry[percentileKey]).toBe("20-39%");
+
+    const edited = updateAssessmentRowFromTableEdit(
+      result.row,
+      assessment,
+      assessmentValueKey(assessment, round, cws),
+      19,
+      context
+    );
+    expect(buildEntryRows([edited], assessment, context)[0][percentileKey]).toBe("40-59% (cohort est.)");
+  });
+
   it("uses an imported percentage instead of the live Score divided by Total calculation", () => {
     const assessment: AssessmentTemplate = {
       id: "percentage-import-test",
