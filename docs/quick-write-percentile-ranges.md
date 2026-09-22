@@ -8,4 +8,4 @@ An imported workbook `%ile` range is retained without the suffix as the authorit
 
 ORF is unchanged. The supplied `2017_ORF_NORMS.pdf` gives discrete Hasbrouck & Tindal CWPM anchors at P10, P25, P50, P75, and P90, but does not prescribe percentile-range labels. The existing ORF calculation therefore continues to display its documented single published anchor (or P1 below P10), rather than Quick Write's range convention. See `docs/orf-percentile-source-decision.md`.
 
-This is application-only work. No Cloud SQL/Data Connect schema, data migration, Firebase Authentication change, or bulk rewrite is required. Nothing in this branch is deployed to Test or Production.
+This is application-only work. No Cloud SQL/Data Connect schema, data migration, Firebase Authentication change, or bulk rewrite is required. The branch was deployed to the isolated Test Vercel project on 2026-09-22; Production is unchanged. Deployment evidence is recorded in `docs/migrations.md`.
