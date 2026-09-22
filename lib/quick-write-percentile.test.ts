@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeQuickWritePercentileRange,
   quickWriteEstimatedPercentileRange,
-  quickWritePercentileRange
+  quickWritePercentileRange,
+  quickWriteWorkbookBelowOnePercent
 } from "./quick-write-percentile";
 
 describe("Quick Write percentile ranges", () => {
@@ -34,5 +35,27 @@ describe("Quick Write percentile ranges", () => {
     expect(quickWriteEstimatedPercentileRange(17)).toBe("1-19% (cohort est.)");
     expect(normalizeQuickWritePercentileRange("1-19% (cohort est.)")).toBe("1-19% (cohort est.)");
     expect(normalizeQuickWritePercentileRange("not a percentile")).toBeNull();
+  });
+
+  it.each([
+    ["3", "winter", 1, true],
+    ["3", "winter", 2, false],
+    ["3", "spring", 2, true],
+    ["3", "spring", 3, false],
+    ["4", "fall", 0, true],
+    ["4", "fall", 1, false],
+    ["4", "winter", 3, true],
+    ["4", "winter", 4, false],
+    ["3", "fall", 0, false],
+    ["4", "spring", 0, false],
+    ["5", "winter", 0, false]
+  ] as const)("checks the workbook-backed <1%% cutoff for grade %s %s CWS %s", (grade, windowId, cws, expected) => {
+    expect(quickWriteWorkbookBelowOnePercent(grade, windowId, cws)).toBe(expected);
+  });
+
+  it("does not infer a workbook cutoff without a valid grade or CWS", () => {
+    expect(quickWriteWorkbookBelowOnePercent(undefined, "winter", 0)).toBe(false);
+    expect(quickWriteWorkbookBelowOnePercent("3", "winter", -1)).toBe(false);
+    expect(quickWriteWorkbookBelowOnePercent("3", "winter", 0.5)).toBe(false);
   });
 });

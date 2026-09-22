@@ -198,7 +198,7 @@ const predefinedCalculations = [
   {
     key: "quick_write_percentile",
     label: "Quick Write %ile range",
-    description: "Estimates a CWS percentile range (<1%, 1-19%, 20-39%, etc.) within the current year, grade, and assessment window cohort. Live results are marked '(cohort est.)'; imported workbook ranges take precedence. Official grade/window cutoffs were not supplied."
+    description: "Calculates <1% from workbook-supported CWS cutoffs in selected Grade 3/4 windows. Other new ranges are current year/grade/window cohort estimates marked '(cohort est.)'. Imported workbook ranges take precedence; a complete norms table was not supplied."
   },
   {
     key: "percentage",
@@ -7292,7 +7292,7 @@ function fieldColumn(
       ? "%ile range"
       : field.name,
     headerTooltip: assessment.id === "quick-write" && field.calculationKey === "quick_write_percentile"
-      ? "Estimated CWS cohort-percentile range; imported workbook values take precedence. Not an official norm."
+      ? "<1% uses workbook-supported cutoffs in selected Grade 3/4 windows. Other calculated ranges are cohort estimates; imported values take precedence. No complete norms table."
       : undefined,
     headerComponent: DefaultValueHeader,
     headerComponentParams: {
@@ -7428,7 +7428,7 @@ function overviewColumnsFor(template: AssessmentTemplate): ColDef<EntryRow>[] {
       {
         field: "quick_write_percentile",
         headerName: "%ile range",
-        headerTooltip: "Estimated CWS cohort-percentile range; imported workbook values take precedence. Not an official norm.",
+        headerTooltip: "<1% uses workbook-supported cutoffs in selected Grade 3/4 windows. Other calculated ranges are cohort estimates; imported values take precedence. No complete norms table.",
         width: 190
       }
     ];

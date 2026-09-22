@@ -128,6 +128,26 @@ describe("spreadsheet assessment imports", () => {
     expect(buildEntryRows([edited], assessment, context)[0][percentileKey]).toBe("40-59% (cohort est.)");
   });
 
+  it("imports a workbook <1% value and recalculates after the CWS changes", () => {
+    const assessment = assessmentTemplates.find((template) => template.id === "quick-write") as AssessmentTemplate;
+    const round = assessment.rounds.find((candidate) => candidate.id === "winter")!;
+    const cws = assessment.fields.find((field) => field.id === "cws")!;
+    const percentile = assessment.fields.find((field) => field.id === "quick-write-percentile")!;
+    const context = { schoolYear: "2025-2026", grade: "3" };
+    const cwsKey = assessmentValueKey(assessment, round, cws);
+    const percentileKey = assessmentValueKey(assessment, round, percentile);
+    const result = applySpreadsheetAssessmentValues(emptyRow(), [
+      { value: 1, match: { assessment, round, field: cws, fieldName: cwsKey } },
+      { value: "<1%", match: { assessment, round, field: percentile, fieldName: percentileKey } }
+    ], context);
+
+    expect(result.validationErrors).toEqual([]);
+    expect(buildEntryRows([result.row], assessment, context)[0][percentileKey]).toBe("<1%");
+
+    const edited = updateAssessmentRowFromTableEdit(result.row, assessment, cwsKey, 2, context);
+    expect(buildEntryRows([edited], assessment, context)[0][percentileKey]).toBe("40-59% (cohort est.)");
+  });
+
   it("uses an imported percentage instead of the live Score divided by Total calculation", () => {
     const assessment: AssessmentTemplate = {
       id: "percentage-import-test",

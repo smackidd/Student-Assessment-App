@@ -16,6 +16,23 @@ export const QUICK_WRITE_PERCENTILE_RANGES = [
 export type QuickWritePercentileRange = (typeof QUICK_WRITE_PERCENTILE_RANGES)[number];
 export type QuickWritePercentileDisplay = QuickWritePercentileRange | `${QuickWritePercentileRange} (cohort est.)`;
 
+// The Grade 3/4 CBM workbooks show adjacent integer CWS scores on opposite
+// sides of the <1% boundary in these windows. No complete norms table exists.
+// Grade 3: January H7:I7 (1, <1%) / H10:I10 (2, 1-19%);
+//          May L5:M5 (2, <1%) / L7:M7 (3, 1-19%).
+// Grade 4: September D4:E4 (0, <1%) / D5:E5 (1, 1-19%);
+//          February H7:I7 (3, <1%) / H4:I4 (4, 1-19%).
+const QUICK_WRITE_BELOW_ONE_CWS_MAX: Record<string, Record<string, number>> = {
+  "3": { winter: 1, spring: 2 },
+  "4": { fall: 0, winter: 3 }
+};
+
+export function quickWriteWorkbookBelowOnePercent(grade: string | undefined, windowId: string, cws: number): boolean {
+  if (!grade || !Number.isSafeInteger(cws) || cws < 0) return false;
+  const maximum = QUICK_WRITE_BELOW_ONE_CWS_MAX[grade]?.[windowId];
+  return maximum !== undefined && cws <= maximum;
+}
+
 export function quickWritePercentileRange(percentile: number): QuickWritePercentileRange | null {
   if (!Number.isFinite(percentile) || percentile < 0 || percentile > 100) return null;
   if (percentile < 1) return "<1%";

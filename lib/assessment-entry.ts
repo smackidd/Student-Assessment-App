@@ -22,7 +22,8 @@ import {
 } from "@/lib/provincial-screening-norms";
 import {
   normalizeQuickWritePercentileRange,
-  quickWriteEstimatedPercentileRange
+  quickWriteEstimatedPercentileRange,
+  quickWriteWorkbookBelowOnePercent
 } from "@/lib/quick-write-percentile";
 import { hydrateOrfRow, type AssessmentValue, type AssessmentValueMap, type OrfResultRow } from "@/lib/sample-results";
 
@@ -152,6 +153,7 @@ function quickWriteEntryValue(
 
   const cws = storedAssessmentNumber(row, assessment, round, cwsField, section, null, context);
   if (typeof cws !== "number") return null;
+  if (quickWriteWorkbookBelowOnePercent(context.grade, round.id, cws)) return "<1%";
 
   const cohortScores = (context.cohortRows ?? [])
     .map((cohortRow) => storedAssessmentNumber(cohortRow, assessment, round, cwsField, section, null, context))

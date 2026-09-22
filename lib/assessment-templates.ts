@@ -256,7 +256,7 @@ export const assessmentTemplates: AssessmentTemplate[] = [
     id: "quick-write",
     name: "Quick Write",
     category: "Literacy",
-    description: "Captures TWW, WSC, CWS, and estimated CWS cohort-percentile ranges by assessment round; imported workbook ranges take precedence.",
+    description: "Captures TWW, WSC, CWS, and percentile ranges by assessment round; selected Grade 3/4 <1% cutoffs come from workbook examples, other new ranges are cohort estimates, and imported ranges take precedence.",
     gradeScope: "Grades 3-12",
     rounds: defaultRounds,
     fields: [

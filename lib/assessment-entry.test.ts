@@ -272,6 +272,35 @@ describe("assessment entry rows", () => {
       .toBe("1-19%");
   });
 
+  it("uses workbook-backed <1% CWS cutoffs only for the supported grade and window", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const cws = quickWrite.fields.find((field) => field.id === "cws")!;
+    const percentile = quickWrite.fields.find((field) => field.id === "quick-write-percentile")!;
+    const cases = [
+      { grade: "3", window: "fall", cws: 0, expected: "40-59% (cohort est.)" },
+      { grade: "3", window: "winter", cws: 0, expected: "<1%" },
+      { grade: "3", window: "winter", cws: 1, expected: "<1%" },
+      { grade: "3", window: "winter", cws: 2, expected: "40-59% (cohort est.)" },
+      { grade: "3", window: "spring", cws: 2, expected: "<1%" },
+      { grade: "3", window: "spring", cws: 3, expected: "40-59% (cohort est.)" },
+      { grade: "4", window: "fall", cws: 0, expected: "<1%" },
+      { grade: "4", window: "fall", cws: 1, expected: "40-59% (cohort est.)" },
+      { grade: "4", window: "winter", cws: 3, expected: "<1%" },
+      { grade: "4", window: "winter", cws: 4, expected: "40-59% (cohort est.)" },
+      { grade: "4", window: "spring", cws: 0, expected: "40-59% (cohort est.)" }
+    ];
+
+    for (const testCase of cases) {
+      const round = quickWrite.rounds.find((candidate) => candidate.id === testCase.window)!;
+      const context = { schoolYear: "2025-2026", grade: testCase.grade };
+      const row = updateAssessmentRowFromTableEdit(
+        emptyRow(), quickWrite, assessmentValueKey(quickWrite, round, cws), testCase.cws, context
+      );
+      const value = buildEntryRows([row], quickWrite, context)[0][assessmentValueKey(quickWrite, round, percentile)];
+      expect(value).toBe(testCase.expected);
+    }
+  });
+
   it("calculates Percentage from Score divided by Total in the current section", () => {
     const template: AssessmentTemplate = {
       id: "sectioned-percentage",
