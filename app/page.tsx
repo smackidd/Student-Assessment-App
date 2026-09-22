@@ -70,6 +70,17 @@ import {
   type EntryRow
 } from "@/lib/assessment-entry";
 import { applySpreadsheetAssessmentValues } from "@/lib/spreadsheet-import";
+import {
+  columnHeadersForImportColumn,
+  containsKnownAssessmentHeader,
+  findHomeroomColumnIndex,
+  findImportColumnMatch,
+  findStudentHeaderLocation,
+  normalizeImportCellValue,
+  normalizedImportLabel,
+  worksheetToImportRows,
+  type ImportColumnMatch
+} from "@/lib/spreadsheet-import-headers";
 import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
 import {
   addDashboardChart,
@@ -5646,14 +5657,6 @@ function readableImportError(error: unknown) {
   return error instanceof Error ? error.message : "Import failed.";
 }
 
-type ImportColumnMatch = {
-  assessment: AssessmentTemplate;
-  round: AssessmentRoundTemplate;
-  field: AssessmentFieldTemplate;
-  section?: AssessmentSectionTemplate;
-  fieldName: string;
-};
-
 type ParsedImportStudent = {
   studentName: string;
   homeroom: string;
@@ -5681,7 +5684,7 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
   if (!worksheet) throw new Error("The selected file does not include a readable worksheet.");
 
   const rows = worksheetToImportRows(worksheet);
-  const headerLocation = findStudentHeaderLocation(rows);
+  const headerLocation = findStudentHeaderLocation(rows, templates);
   if (!headerLocation) {
     throw new Error("Import stopped: no Student Name column was found.");
   }
@@ -5693,6 +5696,9 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
     const headers = columnHeadersForImportColumn(rows, headerRowIndex, columnIndex);
     return findImportColumnMatch(headers, templates);
   });
+  if (importColumns.every((match) => !match) && containsKnownAssessmentHeader(rows.slice(0, headerRowIndex + 1), templates)) {
+    throw new Error("Import stopped: assessment headers were found, but no assessment value columns could be matched. Check the window and metric headers.");
+  }
   const students = rows
     .slice(headerRowIndex + 1)
     .map((row, dataRowIndex): ParsedImportStudent | null => {
@@ -5707,7 +5713,7 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
           .map((match, columnIndex) => {
             if (!match) return null;
             return {
-              value: row[columnIndex] ?? null,
+              value: normalizeImportCellValue(row[columnIndex] ?? null),
               match
             };
           })
@@ -5717,131 +5723,6 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
     .filter((student): student is ParsedImportStudent => Boolean(student));
 
   return { students };
-}
-
-function worksheetToImportRows(worksheet: XLSX.WorkSheet) {
-  const range = XLSX.utils.decode_range(String(worksheet["!ref"] ?? "A1:A1"));
-  const merges = (worksheet["!merges"] as XLSX.Range[] | undefined) ?? [];
-  const rows: Array<Array<string | number | boolean | Date | null>> = [];
-
-  for (let row = range.s.r; row <= range.e.r; row += 1) {
-    const nextRow: Array<string | number | boolean | Date | null> = [];
-    for (let column = range.s.c; column <= range.e.c; column += 1) {
-      nextRow.push(importWorksheetCellValue(worksheet, row, column, merges));
-    }
-    rows.push(nextRow);
-  }
-
-  return rows;
-}
-
-function importWorksheetCellValue(worksheet: XLSX.WorkSheet, row: number, column: number, merges: XLSX.Range[]) {
-  const mergedRange = merges.find((merge) => row >= merge.s.r && row <= merge.e.r && column >= merge.s.c && column <= merge.e.c);
-  const source = mergedRange?.s ?? { r: row, c: column };
-  const cell = worksheet[XLSX.utils.encode_cell(source)];
-  return (cell?.v ?? null) as string | number | boolean | Date | null;
-}
-
-function findStudentHeaderLocation(rows: Array<Array<unknown>>) {
-  const searchRows = rows.slice(0, 12);
-  for (let rowIndex = 0; rowIndex < searchRows.length; rowIndex += 1) {
-    const columnIndex = searchRows[rowIndex].findIndex((cell) => studentHeaderLabels.has(normalizedImportLabel(cell)));
-    if (columnIndex >= 0) return { rowIndex, columnIndex };
-  }
-  return null;
-}
-
-function findHomeroomColumnIndex(headerRow: Array<unknown>) {
-  return headerRow.findIndex((cell) => homeroomHeaderLabels.has(normalizedImportLabel(cell)));
-}
-
-function columnHeadersForImportColumn(rows: Array<Array<unknown>>, headerRowIndex: number, columnIndex: number) {
-  const firstHeaderRow = Math.max(0, headerRowIndex - 3);
-  return rows
-    .slice(firstHeaderRow, headerRowIndex + 1)
-    .map((row, index) => importCellText(headerValueForImportColumn(row, columnIndex, index < 2)))
-    .filter(Boolean);
-}
-
-function headerValueForImportColumn(row: Array<unknown>, columnIndex: number, allowForwardFill: boolean) {
-  const directValue = row[columnIndex];
-  if (importCellText(directValue) || !allowForwardFill) return directValue;
-
-  for (let index = columnIndex - 1; index >= 0; index -= 1) {
-    const candidate = row[index];
-    if (importCellText(candidate)) return candidate;
-  }
-
-  return directValue;
-}
-
-function findImportColumnMatch(headers: string[], templates: AssessmentTemplate[]): ImportColumnMatch | null {
-  if (!headers.length) return null;
-  const normalizedHeaders = headers.map(normalizedImportLabel).filter(Boolean);
-
-  for (const assessment of templates) {
-    if (!looseHeaderLabelMatch(normalizedHeaders, [assessment.name, assessment.id])) continue;
-    for (const round of assessment.rounds) {
-      if (!looseHeaderLabelMatch(normalizedHeaders, [round.label, round.month, windowIndicatorForRound(round), round.id])) continue;
-      const sectionsForRound = sectionsForAssessmentRound(assessment, round);
-      for (const field of assessment.fields) {
-        if (!fieldMatchesRound(field, round) || !fieldHeaderLabelMatch(normalizedHeaders, field)) continue;
-        const fieldSections = sectionsForRound.filter((section) => field.sectionIds?.includes(section.id));
-        if (!fieldSections.length) {
-          return { assessment, round, field, fieldName: assessmentValueKey(assessment, round, field) };
-        }
-        const section = fieldSections.find((candidate) => exactHeaderLabelMatch(normalizedHeaders, [candidate.name, candidate.id]));
-        if (section) return { assessment, round, field, section, fieldName: assessmentValueKey(assessment, round, field, section) };
-      }
-    }
-  }
-
-  return null;
-}
-
-function fieldMatchesRound(field: AssessmentFieldTemplate, round: AssessmentRoundTemplate) {
-  return !field.roundIds?.length || field.roundIds.includes(round.id);
-}
-
-function exactHeaderLabelMatch(normalizedHeaders: string[], labels: Array<string | undefined>) {
-  return labels.some((label) => {
-    const normalizedLabel = normalizedImportLabel(label);
-    return Boolean(normalizedLabel && normalizedHeaders.includes(normalizedLabel));
-  });
-}
-
-function fieldHeaderLabelMatch(normalizedHeaders: string[], field: AssessmentFieldTemplate) {
-  const compactHeaderPath = normalizedHeaders.join("");
-  return [field.name, field.slug, field.id].some((label) => {
-    const normalizedLabel = normalizedImportLabel(label);
-    if (!normalizedLabel) return false;
-    return normalizedHeaders.includes(normalizedLabel) || compactHeaderPath.includes(normalizedLabel);
-  });
-}
-
-function looseHeaderLabelMatch(normalizedHeaders: string[], labels: Array<string | undefined>) {
-  const compactHeaderPath = normalizedHeaders.join("");
-  return labels.some((label) => {
-    const normalizedLabel = normalizedImportLabel(label);
-    if (!normalizedLabel) return false;
-    return (
-      normalizedHeaders.includes(normalizedLabel) ||
-      compactHeaderPath.includes(normalizedLabel) ||
-      normalizedHeaders.some((header) => header.includes(normalizedLabel) || normalizedLabel.includes(header))
-    );
-  });
-}
-
-const studentHeaderLabels = new Set(["studentname", "student", "name", "studentfullname", "fullname"]);
-const homeroomHeaderLabels = new Set(["homeroom", "home room", "hr", "classroom", "class"]);
-
-function normalizedImportLabel(value: unknown) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/&/g, " and ")
-    .replace(/[^a-z0-9]+/g, "")
-    .trim();
 }
 
 function importCellText(value: unknown) {
