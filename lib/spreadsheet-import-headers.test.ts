@@ -63,12 +63,12 @@ describe("spreadsheet import headers", () => {
     const workbook = XLSX.readFile(grade3File);
     const rows = worksheetToImportRows(workbook.Sheets["Overview"]);
     const location = findStudentHeaderLocation(rows, assessmentTemplates);
-    expect(location).toEqual({ rowIndex: 3, columnIndex: 0 });
-    const match = findImportColumnMatch(columnHeadersForImportColumn(rows, location!.rowIndex, 1), assessmentTemplates);
+    expect(location).toEqual({ rowIndex: 3, columnIndex: 1 });
+    const match = findImportColumnMatch(columnHeadersForImportColumn(rows, location!.rowIndex, 2), assessmentTemplates);
     expect(match && { assessment: match.assessment.id, round: match.round.id, section: match.section?.id, field: match.field.id })
       .toEqual({ assessment: "orf", round: "fall", section: "passage-1", field: "wpm" });
-    expect(rows[location!.rowIndex + 1][1]).toBe(38);
-    expect(rows.slice(location!.rowIndex + 1).every((row) => row[0] !== "Student")).toBe(true);
+    expect(rows[location!.rowIndex + 1][2]).toBe(38);
+    expect(rows.slice(location!.rowIndex + 1).every((row) => row[location!.columnIndex] !== "Student")).toBe(true);
     const matchedAssessmentIds = new Set(
       rows[location!.rowIndex]
         .map((_cell, columnIndex) => findImportColumnMatch(columnHeadersForImportColumn(rows, location!.rowIndex, columnIndex), assessmentTemplates))
@@ -82,7 +82,7 @@ describe("spreadsheet import headers", () => {
     );
     let importedValues = 0;
     for (const [index, cells] of rows.slice(location!.rowIndex + 1).entries()) {
-      if (!cells[0]) continue;
+      if (!cells[location!.columnIndex]) continue;
       const row = hydrateOrfRow({
         id: `grade-3-import-${index}`,
         student: "Test Student",
