@@ -34,6 +34,15 @@ describe("Quick Write percentile ranges", () => {
     expect(normalizeQuickWritePercentileRange(17)).toBe("1-19%");
     expect(quickWriteEstimatedPercentileRange(17)).toBe("1-19% (cohort est.)");
     expect(normalizeQuickWritePercentileRange("1-19% (cohort est.)")).toBe("1-19% (cohort est.)");
+    expect(normalizeQuickWritePercentileRange("10%")).toBe("10%");
+    expect(normalizeQuickWritePercentileRange("0-10%")).toBe("0-10%");
+    expect(normalizeQuickWritePercentileRange("10-25%")).toBe("10-25%");
+    expect(normalizeQuickWritePercentileRange("25-50%")).toBe("25-50%");
+    expect(normalizeQuickWritePercentileRange("25–50%")).toBe("25-50%");
+    expect(normalizeQuickWritePercentileRange("25-10%")).toBeNull();
+    expect(normalizeQuickWritePercentileRange("101%")).toBeNull();
+    expect(normalizeQuickWritePercentileRange("10-101%")).toBeNull();
+    expect(normalizeQuickWritePercentileRange("10% (cohort est.)")).toBeNull();
     expect(normalizeQuickWritePercentileRange("not a percentile")).toBeNull();
   });
 

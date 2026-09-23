@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import * as XLSX from "xlsx-js-style";
 import { assessmentTemplates } from "./assessment-templates";
+import { assessmentValueKey, buildEntryRows } from "./assessment-entry";
 import { hydrateOrfRow } from "./sample-results";
 import { applySpreadsheetAssessmentValues } from "./spreadsheet-import";
 import {
@@ -22,6 +23,15 @@ const grade3File = path.resolve(
   "_CBM Tracking Spreadsheets 25-26",
   "For Import",
   "Grade 3 CBM 25-26 - Combined Import.xlsx"
+);
+const grade3LegacyFile = path.resolve(
+  process.cwd(),
+  "..",
+  "project-resources",
+  "Lindseys spreadsheets",
+  "_CBM Tracking Spreadsheets 24-25",
+  "For Import",
+  "Grade 3 CBM 24-25 - Combined Import.xlsx"
 );
 
 describe("spreadsheet import headers", () => {
@@ -100,5 +110,52 @@ describe("spreadsheet import headers", () => {
       importedValues += result.importedValueCount;
     }
     expect(importedValues).toBeGreaterThan(0);
+  });
+
+  it.skipIf(!existsSync(grade3LegacyFile))("imports Grade 3 24-25 ORF scores and preserves source Quick Write percentile labels", () => {
+    const workbook = XLSX.readFile(grade3LegacyFile);
+    const rows = worksheetToImportRows(workbook.Sheets["Overview"]);
+    const location = findStudentHeaderLocation(rows, assessmentTemplates);
+    expect(location).toEqual({ rowIndex: 3, columnIndex: 1 });
+    const matches = rows[location!.rowIndex].map((_cell, columnIndex) =>
+      findImportColumnMatch(columnHeadersForImportColumn(rows, location!.rowIndex, columnIndex), assessmentTemplates)
+    );
+    const context = { schoolYear: "2024-2025", grade: "3" };
+    const quickWrite = assessmentTemplates.find((template) => template.id === "quick-write")!;
+    let orfPercentiles = 0;
+    let quickWritePercentiles = 0;
+
+    for (const [index, cells] of rows.slice(location!.rowIndex + 1).entries()) {
+      if (!cells[location!.columnIndex]) continue;
+      const row = hydrateOrfRow({
+        id: `grade-3-legacy-import-${index}`,
+        student: "Test Student",
+        homeroom: "3A",
+        septP1Wpm: null,
+        septP1Epm: null,
+        septP2Wpm: null,
+        septP2Epm: null,
+        septP3Wpm: null,
+        septP3Epm: null
+      });
+      const values = matches.flatMap((match, columnIndex) =>
+        match ? [{ match, value: normalizeImportCellValue(cells[columnIndex] ?? null) }] : []
+      );
+      const result = applySpreadsheetAssessmentValues(row, values, context);
+      expect(result.validationErrors).toEqual([]);
+
+      const quickWriteEntry = buildEntryRows([result.row], quickWrite, context)[0];
+      for (const { match, value } of values) {
+        if (value === null || value === "" || match.field.name !== "%ile") continue;
+        if (match.assessment.id === "orf") orfPercentiles += 1;
+        if (match.assessment.id === "quick-write") {
+          quickWritePercentiles += 1;
+          expect(quickWriteEntry[assessmentValueKey(quickWrite, match.round, match.field)]).toBe(value);
+        }
+      }
+    }
+
+    expect(orfPercentiles).toBe(34);
+    expect(quickWritePercentiles).toBe(36);
   });
 });

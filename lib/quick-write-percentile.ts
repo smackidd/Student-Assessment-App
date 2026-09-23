@@ -14,7 +14,8 @@ export const QUICK_WRITE_PERCENTILE_RANGES = [
 ] as const;
 
 export type QuickWritePercentileRange = (typeof QUICK_WRITE_PERCENTILE_RANGES)[number];
-export type QuickWritePercentileDisplay = QuickWritePercentileRange | `${QuickWritePercentileRange} (cohort est.)`;
+export type QuickWriteWorkbookPercentileLabel = `${number}%` | `${number}-${number}%`;
+export type QuickWritePercentileDisplay = QuickWritePercentileRange | QuickWriteWorkbookPercentileLabel | `${QuickWritePercentileRange} (cohort est.)`;
 
 // The Grade 3/4 CBM workbooks show adjacent integer CWS scores on opposite
 // sides of the <1% boundary in these windows. No complete norms table exists.
@@ -57,6 +58,16 @@ export function normalizeQuickWritePercentileRange(value: unknown): QuickWritePe
   const band = estimated ? normalized.slice(0, -"(cohortest.)".length) : normalized;
   if (QUICK_WRITE_PERCENTILE_RANGES.some((range) => range === band)) {
     return estimated ? `${band} (cohort est.)` as QuickWritePercentileDisplay : band as QuickWritePercentileRange;
+  }
+  // Imported workbook labels use their own bands; keep them instead of replacing
+  // them with the app's provisional cohort bands.
+  const workbookLabel = !estimated && /^(\d+(?:\.\d+)?)(?:-(\d+(?:\.\d+)?))?%$/.exec(band);
+  if (workbookLabel) {
+    const lower = Number(workbookLabel[1]);
+    const upper = Number(workbookLabel[2] ?? workbookLabel[1]);
+    if (lower >= 0 && lower <= upper && upper <= 100) {
+      return band as QuickWriteWorkbookPercentileLabel;
+    }
   }
   if (/^(?:\d+(?:\.\d+)?|\.\d+)$/.test(normalized)) {
     return quickWritePercentileRange(Number(normalized));
