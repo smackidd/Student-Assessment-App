@@ -27,9 +27,34 @@ export function normalizedImportLabel(value: unknown) {
     .trim();
 }
 
-export function normalizeImportCellValue(value: string | number | boolean | Date | null) {
+export function normalizeImportCellValue(
+  value: string | number | boolean | Date | null,
+  match?: ImportColumnMatch | null,
+  numberFormat?: string
+) {
   // The CBM workbooks use n/a to mean a measurement was not available.
-  return typeof value === "string" && value.trim().toLowerCase() === "n/a" ? null : value;
+  if (typeof value === "string" && value.trim().toLowerCase() === "n/a") return null;
+  // ORF percentile ranks are stored as points (11, not 0.11). Excel stores a
+  // cell displayed as 11% as 0.11, so only scale source cells with a real %
+  // number format. An unformatted rank of 1 must remain the 1st percentile.
+  if (
+    typeof value === "number" && Number.isFinite(value) &&
+    match?.assessment.id === "orf" && match.field.calculationKey?.startsWith("orf_percentile") &&
+    hasPercentNumberFormat(numberFormat)
+  ) return Number((value * 100).toFixed(10));
+  return value;
+}
+
+function hasPercentNumberFormat(format: string | undefined) {
+  if (!format) return false;
+  let quoted = false;
+  for (let index = 0; index < format.length; index += 1) {
+    const character = format[index];
+    if (character === "\\") { index += 1; continue; }
+    if (character === '"') { quoted = !quoted; continue; }
+    if (character === "%" && !quoted) return true;
+  }
+  return false;
 }
 
 export function worksheetToImportRows(worksheet: XLSX.WorkSheet) {
@@ -145,6 +170,11 @@ function exactHeaderLabelMatch(normalizedHeaders: string[], labels: Array<string
 }
 
 function fieldHeaderLabelMatch(normalizedHeaders: string[], field: AssessmentFieldTemplate) {
+  // These ORF metrics share a suffix, so substring matching would map CWPM to WPM.
+  if (field.id === "wpm" || field.id === "cwpm") {
+    return exactHeaderLabelMatch(normalizedHeaders, [field.name, field.slug, field.id]);
+  }
+
   const compactHeaderPath = normalizedHeaders.join("");
   return [field.name, field.slug, field.id].some((label) => {
     const normalizedLabel = normalizedImportLabel(label);

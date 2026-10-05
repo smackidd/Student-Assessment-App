@@ -8,7 +8,11 @@ import {
   type NumeracyComponent
 } from "@/lib/provincial-screening-norms";
 
-export type AssessmentDataType = "integer" | "percentage" | "letter" | "text" | "date" | "file" | "calculated";
+export type AssessmentDataType = "integer" | "float" | "percentage" | "letter" | "text" | "date" | "file" | "calculated";
+
+export function isNumericAssessmentDataType(dataType: AssessmentDataType) {
+  return dataType === "integer" || dataType === "float" || dataType === "percentage";
+}
 export type Visibility = "evaluators" | "vice-principal" | "admin";
 
 export type AssessmentFieldValidationConfig = {

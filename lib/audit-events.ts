@@ -14,6 +14,10 @@ export type OrganizationAuditEvent = {
 
 export type AuditSortKey = "createdAt" | "eventType" | "entityType" | "entityLabel" | "actor";
 
+export function isImportAuditEvent(eventType: string) {
+  return eventType === "Imported spreadsheet" || eventType === "Imported PDF reports";
+}
+
 export function mergeAuditEvents(...eventGroups: Array<readonly OrganizationAuditEvent[] | null | undefined>) {
   const eventsById = new Map<string, OrganizationAuditEvent>();
 
@@ -35,7 +39,7 @@ export function mergeAuditEvents(...eventGroups: Array<readonly OrganizationAudi
   }
 
   return merged.map((event) => {
-    if (event.eventType !== "Imported spreadsheet" || !event.importLogId || event.revertedAt) return event;
+    if (!isImportAuditEvent(event.eventType) || !event.importLogId || event.revertedAt) return event;
     const revertedAt = revertedAtByImportId.get(event.importLogId);
     return revertedAt ? { ...event, revertedAt } : event;
   });

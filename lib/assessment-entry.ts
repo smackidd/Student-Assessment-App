@@ -477,14 +477,16 @@ export function validateAssessmentValue(
       : { valid: false, value: null, error: `${field.name} must be a percentile from 0 to 100 or a supported range.` };
   }
 
-  if (field.dataType !== "integer" && field.dataType !== "percentage" && field.dataType !== "calculated") {
+  if (field.dataType !== "integer" && field.dataType !== "float" && field.dataType !== "percentage" && field.dataType !== "calculated") {
     return { valid: true, value: String(value), error: null };
   }
 
   const rawValue = typeof value === "string" ? value.trim() : value;
   const numericPattern = field.dataType === "integer"
     ? /^[+-]?\d+$/
-    : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+    : field.dataType === "float"
+      ? /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i
+      : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
 
   if (typeof rawValue !== "number" && (typeof rawValue !== "string" || !numericPattern.test(rawValue))) {
     return {
@@ -504,8 +506,8 @@ export function validateAssessmentValue(
     return { valid: false, value: null, error: `${field.name} must be a whole number.` };
   }
 
-  const minimum = field.validationConfig?.min ?? 0;
-  const maximum = field.validationConfig?.max ?? (field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER);
+  const minimum = field.validationConfig?.min ?? (field.dataType === "float" ? -Number.MAX_VALUE : 0);
+  const maximum = field.validationConfig?.max ?? (field.dataType === "float" ? Number.MAX_VALUE : field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER);
   if (numericValue < minimum || numericValue > maximum) {
     return {
       valid: false,
@@ -527,8 +529,9 @@ export function validateAssessmentValue(
 }
 
 function decimalPlaces(value: string | number) {
-  const [, fraction = ""] = String(value).split(".");
-  return fraction.length;
+  const [coefficient, exponent = "0"] = String(value).toLowerCase().split("e");
+  const [, fraction = ""] = coefficient.split(".");
+  return Math.max(0, fraction.length - Number(exponent));
 }
 
 export function validateAssessmentTableEdit(

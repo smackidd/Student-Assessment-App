@@ -2396,10 +2396,65 @@ textarea {
   color: var(--muted);
 }
 
-.files-layout {
+.pdf-import-layout {
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
+  grid-template-columns: minmax(230px, 290px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   gap: 16px;
+  min-height: 0;
+  overflow: auto;
+  align-items: start;
+}
+
+.pdf-import-controls {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  max-height: 100%;
+  overflow: auto;
+}
+
+.pdf-import-controls label {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.pdf-import-controls input[type="file"] { width: 100%; min-width: 0; }
+.pdf-import-controls h2, .pdf-import-heading h2 { margin: 0; }
+.pdf-import-help { font-size: 12px; margin: 0; }
+.pdf-import-files { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.pdf-import-files li { display: flex; gap: 8px; align-items: start; border-top: 1px solid var(--line); padding-top: 10px; font-size: 12px; }
+.pdf-import-files span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.pdf-import-files button { padding: 4px 6px; font-size: 12px; }
+.pdf-import-files small { display: block; color: var(--muted); margin-top: 4px; }
+.pdf-import-review { display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; max-height: 100%; overflow: hidden; }
+.pdf-import-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.pdf-import-messages { flex-shrink: 0; max-height: 180px; overflow-y: auto; font-size: 13px; }
+.pdf-import-messages p { margin: 10px 0; }
+.pdf-import-error { color: #a52c28; }
+.pdf-import-table-scroll { min-height: 140px; overflow: auto; margin-top: 12px; flex: 1; }
+.pdf-import-table { min-width: 680px; }
+.pdf-import-table thead { position: sticky; top: 0; z-index: 1; }
+.pdf-import-table thead th { background: var(--panel-2); }
+.pdf-import-table th:first-child, .pdf-import-table td:first-child { min-width: 38px; width: 38px; text-align: center; }
+.pdf-import-table small { display: block; margin-top: 4px; font-size: 11px; font-weight: 400; overflow-wrap: anywhere; }
+.pdf-import-table tbody th { min-width: 170px; max-width: 280px; }
+.pdf-import-table tbody td:nth-child(5) { min-width: 130px; max-width: 280px; text-align: left; }
+.pdf-import-table input[type="checkbox"] { width: 16px; height: 16px; margin: 0; }
+.pdf-import-invalid > th, .pdf-import-invalid > td:nth-child(5) { color: #a52c28; }
+
+@media (max-width: 1000px) {
+  .pdf-import-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; }
+  .pdf-import-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .pdf-import-controls > h2, .pdf-import-controls > p, .pdf-import-controls > ul { grid-column: 1 / -1; }
+  .pdf-import-controls { max-height: none; }
+  .pdf-import-review { height: auto; max-height: none; }
+  .pdf-import-table-scroll { max-height: 60vh; }
+}
+
+@media (max-width: 520px) {
+  .pdf-import-controls { grid-template-columns: minmax(0, 1fr); }
 }
 
 .report-year-picker {

@@ -44,6 +44,7 @@ import {
 import {
   assessmentTemplates,
   emptyCustomTemplate,
+  isNumericAssessmentDataType,
   normalizeAssessmentTemplates,
   type AssessmentDefinitionSnapshot,
   type AssessmentDataType,
@@ -70,6 +71,8 @@ import {
   type EntryRow
 } from "@/lib/assessment-entry";
 import { applySpreadsheetAssessmentValues } from "@/lib/spreadsheet-import";
+import { ReportPdfImporter, type ReportImportResult } from "@/components/report-pdf-importer";
+import { applyReportImport, type ReportImportRequest } from "@/lib/report-pdf-import";
 import {
   columnHeadersForImportColumn,
   containsKnownAssessmentHeader,
@@ -84,6 +87,7 @@ import {
 import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
 import {
   addDashboardChart,
+  averageDashboardValues,
   compactDashboardChartLabel,
   compactDashboardLegendLabel,
   dashboardAxisLabelCharacterLimit,
@@ -143,6 +147,7 @@ import { prepareInvitationHandoff } from "@/lib/invitation-handoff";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
 import { studentRowsNeedingSqlSync } from "@/lib/student-sync";
 import {
+  isImportAuditEvent,
   mergeAuditEvents,
   sortAuditEvents,
   type AuditSortKey,
@@ -178,7 +183,7 @@ import {
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-const dataTypes: AssessmentDataType[] = ["integer", "percentage", "letter", "text", "date", "file", "calculated"];
+const dataTypes: AssessmentDataType[] = ["integer", "float", "percentage", "letter", "text", "date", "file", "calculated"];
 const dashboardYears = ["2026-2027", "2025-2026", "2024-2025"];
 const predefinedCalculations = [
   {
@@ -312,7 +317,7 @@ export default function StudentEvaluationApp() {
   const [lastSavedWorkspaceState, setLastSavedWorkspaceState] = useState<SavedWorkspaceState | null>(null);
   const [lockedOverviewYears, setLockedOverviewYears] = useState<string[]>([]);
   const [overviewPlacements, setOverviewPlacements] = useState<StudentPlacement[]>([]);
-  const [uploadedReports, setUploadedReports] = useState<UploadedReport[]>([]);
+  const reportImportSavingRef = useRef(false);
   const [activeNoteStudentId, setActiveNoteStudentId] = useState<string | null>(null);
   const [overviewDialog, setOverviewDialog] = useState<OverviewDialog>(null);
   const [importLogs, setImportLogs] = useState<ImportChangeLog[]>([]);
@@ -764,7 +769,7 @@ export default function StudentEvaluationApp() {
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
-      if (saveStatus !== "dirty") return;
+      if (saveStatus !== "dirty" && saveStatus !== "saving") return;
       event.preventDefault();
       event.returnValue = "";
     }
@@ -829,6 +834,7 @@ export default function StudentEvaluationApp() {
   }
 
   function confirmUnsavedChanges() {
+    if (reportImportSavingRef.current) return false;
     if (saveStatus !== "dirty") return true;
     const shouldLeave = window.confirm("You have unsaved table changes. Leave this tab without saving?");
     if (shouldLeave) {
@@ -1019,6 +1025,7 @@ export default function StudentEvaluationApp() {
   }
 
   function addCustomAssessment() {
+    if (reportImportSavingRef.current) return;
     const id = `custom-${templates.length + 1}`;
     const custom = {
       ...emptyCustomTemplate,
@@ -1558,6 +1565,48 @@ export default function StudentEvaluationApp() {
     };
   }
 
+  async function importReportPdfs(request: ReportImportRequest): Promise<ReportImportResult> {
+    if (!isAdmin || !authUser || workspaceReadyForUid !== authUser.uid) throw new Error("An active administrator must load the workspace before importing.");
+    if (reportImportSavingRef.current || saveStatus === "saving" || saveStatus === "dirty") throw new Error("Finish saving current changes before importing PDFs.");
+    if (lastSavedWorkspaceState?.pendingStudentSync) throw new Error("Student synchronization is still pending. Resolve it before importing reports.");
+    const planned = applyReportImport(request, { rows: orfRows, placements: overviewPlacements, templates, schoolYears, lockedOverviewYears });
+    if (!planned.dataCellCount) return { studentCount: planned.reviewedRows.length, valueCount: 0, auditSaved: true };
+    reportImportSavingRef.current = true;
+    setSaveStatus("saving");
+    try {
+      const importId = `pdf-import-${crypto.randomUUID()}`;
+      const fileNames = [...new Set(planned.reviewedRows.map((row) => row.fileName))].join(", ");
+      const importLog: ImportChangeLog = {
+        id: importId, fileName: fileNames, schoolYear: request.selection.schoolYear, grade: request.selection.grade,
+        createdAt: new Date().toISOString(), importedCount: planned.updatedRows.length, dataCellCount: planned.dataCellCount,
+        duplicateNames: [], addedStudentIds: [], addedRows: [], addedPlacements: [], updatedRows: planned.updatedRows
+      };
+      // Scores and reversal snapshots are committed together by the existing,
+      // version-checked workspace save; no student identities are created here.
+      const saved = await savePrototypeWorkspaceState({
+        rows: planned.rows, placements: overviewPlacements, templates, schoolYears, lockedOverviewYears,
+        auditEvents, importLogs: [importLog, ...importLogs], pendingStudentSync: false
+      });
+      setOrfRows(saved.rows);
+      setImportLogs(saved.importLogs ?? [importLog, ...importLogs]);
+      setLastSavedWorkspaceState(saved);
+      const auditEvent = createAuditEvent("Imported PDF reports", "Assessment import", `${request.selection.schoolYear} / Grade ${request.selection.grade}`,
+        `Imported ${planned.dataCellCount} score value${planned.dataCellCount === 1 ? "" : "s"} for ${planned.updatedRows.length} student${planned.updatedRows.length === 1 ? "" : "s"} from ${fileNames}.`,
+        { importLogId: importId, id: `audit-import-${importId}` });
+      setAuditEvents((current) => mergeAuditEvents([auditEvent], current));
+      const auditSaved = Boolean(await persistAuditEvent(auditEvent));
+      setSaveStatus("saved");
+      setSaveMessage(`PDF import complete. ${planned.dataCellCount} values saved to Firebase.`);
+      return { studentCount: planned.reviewedRows.length, valueCount: planned.dataCellCount, auditSaved };
+    } catch (error) {
+      setSaveStatus("error");
+      setSaveMessage(error instanceof Error ? error.message : "PDF import could not be saved.");
+      throw error;
+    } finally {
+      reportImportSavingRef.current = false;
+    }
+  }
+
   async function revertImport(importLogId: string): Promise<ImportRevertOutcome> {
     if (revertingImportIdsRef.current.has(importLogId)) return "unavailable";
     const importLog = importLogs.find((log) => log.id === importLogId);
@@ -1944,7 +1993,13 @@ export default function StudentEvaluationApp() {
             recordAudit={recordAudit}
           />
         ) : activeView === "files" ? (
-          <ReportFiles rows={orfRows} reports={uploadedReports} setReports={setUploadedReports} recordAudit={recordAudit} />
+          <ReportPdfImporter
+            workspace={{ rows: orfRows, placements: overviewPlacements, templates, schoolYears, lockedOverviewYears }}
+            initialYear={selectedOverviewYear}
+            initialGrade={selectedOverviewGrade}
+            disabled={!authUser || workspaceReadyForUid !== authUser.uid}
+            onImport={importReportPdfs}
+          />
         ) : activeView === "profile" ? (
           <ProfilePage
             isAdmin={isAdmin}
@@ -2117,16 +2172,6 @@ type SavedWorkspaceState = WorkspaceStudentSnapshot & {
   };
   auditEvents?: AppAuditEvent[];
   importLogs?: ImportChangeLog[];
-};
-
-type UploadedReport = {
-  id: string;
-  studentId: string;
-  assessment: string;
-  round: string;
-  fileName: string;
-  fileSize: number;
-  storagePath: string;
 };
 
 function AuthScreen({ invitationHandoffComplete }: { invitationHandoffComplete: boolean }) {
@@ -3372,7 +3417,7 @@ function DefaultValuePopup({
 }) {
   const [value, setValue] = useState(target.scaleCodes[0] ?? "");
   const [validationError, setValidationError] = useState("");
-  const inputType = target.field.dataType === "integer" || target.field.dataType === "percentage" ? "number" : target.field.dataType === "date" ? "date" : "text";
+  const inputType = isNumericAssessmentDataType(target.field.dataType) ? "number" : target.field.dataType === "date" ? "date" : "text";
 
   return (
     <div className="modal-backdrop nested-modal" role="dialog" aria-modal="true" aria-label="Default column value">
@@ -3403,8 +3448,8 @@ function DefaultValuePopup({
             <input
               autoFocus
               max={target.field.validationConfig?.max ?? (target.field.dataType === "percentage" ? 100 : undefined)}
-              min={target.field.validationConfig?.min ?? (inputType === "number" ? 0 : undefined)}
-              step={target.field.dataType === "integer" ? 1 : target.field.dataType === "percentage" ? "any" : undefined}
+              min={target.field.validationConfig?.min ?? (inputType === "number" && target.field.dataType !== "float" ? 0 : undefined)}
+              step={target.field.dataType === "integer" ? 1 : inputType === "number" ? "any" : undefined}
               type={inputType}
               value={value}
               onChange={(event) => {
@@ -4098,13 +4143,13 @@ function DashboardChartCard({
   const pieData = useMemo(
     () =>
       selectedFieldRefs
-        .map(({ id, label }) => {
+        .map(({ id, label, field }) => {
           const values = chartData
             .map((point) => point[id])
             .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
           return {
             name: label,
-            value: values.length ? Math.round((values.reduce((total, value) => total + value, 0) / values.length) * 10) / 10 : 0
+            value: averageDashboardValues(values, field.dataType) ?? 0
           };
         })
         .filter((item) => item.value > 0),
@@ -4538,8 +4583,7 @@ function averageDashboardFieldValue(
     .map((value) => dashboardChartValue(value, field, scaleCodes))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
 
-  if (!values.length) return null;
-  return Math.round((values.reduce((total, value) => total + value, 0) / values.length) * 10) / 10;
+  return averageDashboardValues(values, field.dataType);
 }
 
 function dashboardChartValue(value: unknown, field: AssessmentFieldTemplate, scaleCodes: string[]) {
@@ -5678,7 +5722,7 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
 
   const workbook = file.name.toLowerCase().endsWith(".csv")
     ? XLSX.read(await file.text(), { type: "string" })
-    : XLSX.read(await file.arrayBuffer(), { type: "array" });
+    : XLSX.read(await file.arrayBuffer(), { type: "array", cellNF: true });
   const firstSheetName = workbook.SheetNames[0];
   const worksheet = firstSheetName ? workbook.Sheets[firstSheetName] : null;
   if (!worksheet) throw new Error("The selected file does not include a readable worksheet.");
@@ -5699,6 +5743,7 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
   if (importColumns.every((match) => !match) && containsKnownAssessmentHeader(rows.slice(0, headerRowIndex + 1), templates)) {
     throw new Error("Import stopped: assessment headers were found, but no assessment value columns could be matched. Check the window and metric headers.");
   }
+  const worksheetRange = XLSX.utils.decode_range(String(worksheet["!ref"] ?? "A1:A1"));
   const students = rows
     .slice(headerRowIndex + 1)
     .map((row, dataRowIndex): ParsedImportStudent | null => {
@@ -5712,8 +5757,12 @@ async function parseStudentImportFile(file: File, templates: AssessmentTemplate[
         values: importColumns
           .map((match, columnIndex) => {
             if (!match) return null;
+            const sourceCell = worksheet[XLSX.utils.encode_cell({
+              r: worksheetRange.s.r + headerRowIndex + dataRowIndex + 1,
+              c: worksheetRange.s.c + columnIndex
+            })];
             return {
-              value: normalizeImportCellValue(row[columnIndex] ?? null),
+              value: normalizeImportCellValue(row[columnIndex] ?? null, match, sourceCell?.z),
               match
             };
           })
@@ -6496,120 +6545,6 @@ function ColumnOptionGroup({
   );
 }
 
-function ReportFiles({
-  rows,
-  reports,
-  setReports,
-  recordAudit
-}: {
-  rows: OrfResultRow[];
-  reports: UploadedReport[];
-  setReports: React.Dispatch<React.SetStateAction<UploadedReport[]>>;
-  recordAudit: RecordAudit;
-}) {
-  const [studentId, setStudentId] = useState(rows[0]?.id ?? "");
-  const [assessment, setAssessment] = useState("star-reading");
-  const [round, setRound] = useState("fall");
-  const selectedStudent = rows.find((row) => row.id === studentId) ?? rows[0];
-
-  function onFileSelected(fileList: FileList | null) {
-    const file = fileList?.[0];
-    if (!file || !selectedStudent) return;
-
-    const safeFileName = file.name.replace(/[^a-zA-Z0-9._-]/g, "-");
-    const storagePath = [
-      "assessment-files",
-      "2026-2027",
-      selectedStudent.homeroom,
-      assessment,
-      round,
-      selectedStudent.id,
-      safeFileName
-    ].join("/");
-
-    setReports((current) => [
-      {
-        id: `report-${current.length + 1}`,
-        studentId: selectedStudent.id,
-        assessment,
-        round,
-        fileName: file.name,
-        fileSize: file.size,
-        storagePath
-      },
-      ...current
-    ]);
-    recordAudit("Selected report file", "Report attachment", selectedStudent.student, `Queued ${file.name} for ${assessment} / ${round} at ${storagePath}.`);
-  }
-
-  return (
-    <section className="files-layout">
-      <div className="panel files-controls">
-        <p className="eyebrow">Report Files</p>
-        <h2>Attach PDFs and downloaded reports</h2>
-        <p>Star Reading, Star Math, Lexia, and other report-style assessments can be stored as files.</p>
-
-        <label>
-          Student
-          <select value={studentId} onChange={(event) => setStudentId(event.target.value)}>
-            {rows.map((row) => (
-              <option key={row.id} value={row.id}>
-                {row.student} / {row.homeroom}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          Assessment
-          <select value={assessment} onChange={(event) => setAssessment(event.target.value)}>
-            <option value="star-reading">Star Reading</option>
-            <option value="star-math">Star Math</option>
-            <option value="lexia">Lexia</option>
-            <option value="custom-report">Custom report</option>
-          </select>
-        </label>
-
-        <label>
-          Round
-          <select value={round} onChange={(event) => setRound(event.target.value)}>
-            <option value="fall">September / Fall</option>
-            <option value="winter">January / Winter</option>
-            <option value="spring">May / Spring</option>
-          </select>
-        </label>
-
-        <label>
-          Select report file
-          <input accept="application/pdf,.pdf,.png,.jpg,.jpeg" type="file" onChange={(event) => onFileSelected(event.target.files)} />
-        </label>
-      </div>
-
-      <div className="panel files-list-panel">
-        <div className="panel-heading">
-          <p className="eyebrow">Storage Queue</p>
-          <h2>Pending report attachments</h2>
-        </div>
-
-        <div className="files-list">
-          {reports.length ? (
-            reports.map((report) => (
-              <article className="file-card" key={report.id}>
-                <div>
-                  <strong>{report.fileName}</strong>
-                  <p>{report.assessment} / {report.round} / {Math.round(report.fileSize / 1024)} KB</p>
-                </div>
-                <code>{report.storagePath}</code>
-              </article>
-            ))
-          ) : (
-            <div className="empty-state">No report files selected yet.</div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
 
 function AuditLog({
   events,
@@ -6734,7 +6669,7 @@ function AuditLog({
           </div>
           {sortedEvents.map((event) => {
             const importLog = event.importLogId ? importLogs.find((log) => log.id === event.importLogId) : null;
-            const canRevert = Boolean(importLog && !importLog.revertedAt && event.eventType === "Imported spreadsheet");
+            const canRevert = Boolean(importLog && !importLog.revertedAt && !event.revertedAt && isImportAuditEvent(event.eventType));
             const auditPending = pendingAuditEventIds.has(event.id);
             return (
               <div className={auditPending ? "audit-table-row audit-pending-row" : "audit-table-row"} role="row" key={event.id}>
@@ -7154,10 +7089,10 @@ function fieldColumn(
   const scaleCodeParams = usesScaleCodeEditor
     ? { codes: scaleCodes }
     : undefined;
-  const numberEditorParams = field.dataType === "integer" || field.dataType === "percentage"
+  const numberEditorParams = isNumericAssessmentDataType(field.dataType)
     ? (params: { data: EntryRow }) => ({
-        min: field.validationConfig?.min ?? 0,
-        max: field.validationConfig?.max ?? (field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER),
+        min: field.validationConfig?.min ?? (field.dataType === "float" ? undefined : 0),
+        max: field.validationConfig?.max ?? (field.dataType === "float" ? undefined : field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER),
         precision: field.dataType === "integer" ? 0 : field.validationConfig?.precision,
         step: field.dataType === "integer" ? 1 : undefined,
         preventStepping: true,
@@ -7187,7 +7122,7 @@ function fieldColumn(
     singleClickEdit: usesScaleCodeEditor,
     cellEditor: usesScaleCodeEditor
       ? ScaleCodeCellEditor
-      : field.dataType === "integer" || field.dataType === "percentage"
+      : isNumericAssessmentDataType(field.dataType)
         ? "agNumberCellEditor"
         : undefined,
     cellEditorParams: scaleCodeParams ?? numberEditorParams,
@@ -7217,7 +7152,7 @@ function fieldColumn(
       return true;
     },
     valueParser: (params) => {
-      if (field.dataType !== "integer" && field.dataType !== "percentage") return params.newValue;
+      if (!isNumericAssessmentDataType(field.dataType)) return params.newValue;
       if (!params.data) return params.oldValue;
       const validation = validateAssessmentTableEdit(params.data, assessment, fieldName, params.newValue, context);
       return validation.valid ? validation.value : params.oldValue;
