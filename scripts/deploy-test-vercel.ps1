@@ -3,6 +3,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$deploymentSucceeded = $false
 
 $appRoot = Split-Path -Parent $PSScriptRoot
 $vercelCli = Join-Path $appRoot "node_modules\.bin\vercel.cmd"
@@ -51,6 +52,7 @@ try {
   if ($LASTEXITCODE -ne 0) {
     throw "The Vercel test deployment failed."
   }
+  $deploymentSucceeded = $true
 }
 finally {
   if (Test-Path -LiteralPath $deploymentRoot) {
@@ -74,7 +76,8 @@ finally {
       }
       catch [System.IO.IOException] {
         if ($attempt -eq 5) {
-          Write-Warning "Deployment succeeded, but the temporary staging directory is still locked: $resolvedDeploymentRoot"
+          $deploymentStatus = if ($deploymentSucceeded) { "succeeded" } else { "failed" }
+          Write-Warning "Deployment $deploymentStatus; the temporary staging directory is still locked: $resolvedDeploymentRoot"
         }
         else {
           Start-Sleep -Milliseconds 500
