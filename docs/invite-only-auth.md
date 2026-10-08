@@ -2,7 +2,7 @@
 
 ## Decision and scope
 
-On 2026-10-08 the owner authorized merging master into `feature/foothills-google-sso`, completing the school-only policy with one exact outside email exception, and deploying to Test. Production remains pending. See `MIG-20261008-001` in [migrations.md](migrations.md).
+On 2026-10-08 the owner authorized merging master into `feature/foothills-google-sso`, completing the school-only policy with one exact outside email exception, and deploying to Test. Test is now deployed with Google as the only enabled sign-in provider and three existing allowed-member accounts migrated. The live Google entry screen is verified; completed real-account sign-in and invitation acceptance remain pending. Production remains pending. See `MIG-20261008-001` in [migrations.md](migrations.md).
 
 Every organization member must use Sign in with Google. Foothills staff require an exact `foothillsacademy.org` email and Google's trusted Workspace hosted domain. One outside address may be authorized through the server-only `APPROVED_EXTERNAL_EMAIL` Function parameter; empty or invalid configuration disables that exception. Every allowed account still needs an existing administrator-issued membership and role. Google sign-in never creates membership or promotes an Admin.
 
@@ -28,7 +28,7 @@ Direct resource authorization must also reject old unmarked/password tokens. `sc
 
 ## Test account migration and release
 
-Before remote writes, record the release in the migration ledger. Deploy reviewed blocking/callable Functions and Google provider configuration explicitly to `student-assessment-test`. `firebase.auth-test.json` is the Test-only Google provider definition; its CLI setup requires Firebase CLI 15.6.0 or newer. The OAuth audience must support External accounts; the app's membership policy restricts access. Authorized origins and the provider callback must match Test. Email/password can be disabled after the reviewed account migration; existing credentials are retained for recovery.
+Before remote writes, record the release in the migration ledger. Deploy reviewed blocking/callable Functions and Google provider configuration explicitly to `student-assessment-test`. `firebase.auth-test.json` is the Test-only Google provider definition; its CLI setup requires Firebase CLI 15.6.0 or newer. The OAuth audience must support External accounts; the app's membership policy restricts access. Authorized origins and the provider callback must match Test. Email authentication is disabled in Test after the reviewed account migration; existing credentials are retained for recovery. Firebase CLI 15.6.0 ignores `emailPassword: false`: use the narrow Identity Platform configuration update with `updateMask=signIn.email.enabled` and `{ "signIn": { "email": { "enabled": false } } }`, then verify Google and both blocking triggers remain enabled.
 
 The controlled migration tool [google-sso-migration.md](google-sso-migration.md) defaults to a reviewed dry run. Applying it requires exact Test project assertions and the reviewed plan hash, provider readiness, an eligible enabled Admin, and a Windows CurrentUser DPAPI recovery snapshot before any write. It retains user IDs, roles, grade/homeroom, unrelated claims and credentials, then revokes eligible users' refresh tokens. Excluded accounts are unchanged and the strict policy rejects their app access.
 
@@ -86,7 +86,7 @@ Cloud Storage rules must be migrated separately to the same `organizationId`, `r
 
 ## Security assessment
 
-The access boundary depends on the callable functions, blocking functions, custom claims, and matching SQL Connect and Storage authorization rules being deployed together. The local Google SSO changes do not establish a verified remote security posture; the setup and integration gates above remain pending.
+The access boundary depends on the callable functions, blocking functions, custom claims, and matching SQL Connect and Storage authorization rules being deployed together. The matching Test Functions, provider and direct-resource guards have been deployed and independently read back; the live Google entry screen has been checked. Completed real-account OAuth, reserved/existing UID linking and role/classroom acceptance remain the integration gates above. Production has not been changed.
 
 Recommended follow-up controls:
 
