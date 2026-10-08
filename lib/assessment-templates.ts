@@ -8,7 +8,11 @@ import {
   type NumeracyComponent
 } from "@/lib/provincial-screening-norms";
 
-export type AssessmentDataType = "integer" | "percentage" | "letter" | "text" | "date" | "file" | "calculated";
+export type AssessmentDataType = "integer" | "float" | "percentage" | "letter" | "text" | "date" | "file" | "calculated";
+
+export function isNumericAssessmentDataType(dataType: AssessmentDataType) {
+  return dataType === "integer" || dataType === "float" || dataType === "percentage";
+}
 export type Visibility = "evaluators" | "vice-principal" | "admin";
 
 export type AssessmentFieldValidationConfig = {
@@ -256,7 +260,7 @@ export const assessmentTemplates: AssessmentTemplate[] = [
     id: "quick-write",
     name: "Quick Write",
     category: "Literacy",
-    description: "Captures TWW, WSC, CWS, and percentile by assessment round.",
+    description: "Captures TWW, WSC, CWS, and percentile ranges by assessment round; selected Grade 3/4 <1% cutoffs come from workbook examples, other new ranges are cohort estimates, and imported ranges take precedence.",
     gradeScope: "Grades 3-12",
     rounds: defaultRounds,
     fields: [

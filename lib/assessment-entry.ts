@@ -20,6 +20,11 @@ import {
   type Cc3Component,
   type NumeracyComponent
 } from "@/lib/provincial-screening-norms";
+import {
+  normalizeQuickWritePercentileRange,
+  quickWriteEstimatedPercentileRange,
+  quickWriteWorkbookBelowOnePercent
+} from "@/lib/quick-write-percentile";
 import { hydrateOrfRow, type AssessmentValue, type AssessmentValueMap, type OrfResultRow } from "@/lib/sample-results";
 
 export type EntryRow = OrfResultRow & Record<string, AssessmentValue | AssessmentValueMap | undefined>;
@@ -105,7 +110,11 @@ export function entryValue(
   if (typeof provincialValue !== "undefined") return provincialValue;
   if (isCalculatedAssessmentField(field) && hasScopedAssessmentContext(context)) {
     const importedOverride = storedAssessmentValue(row, assessment, round, field, section, context);
-    if (typeof importedOverride !== "undefined") return importedOverride;
+    if (typeof importedOverride !== "undefined") {
+      return assessmentFieldMeaning(field) === "quick_write_percentile"
+        ? normalizeQuickWritePercentileRange(importedOverride)
+        : importedOverride;
+    }
   }
   if (assessment.id === "orf" && field.isCalculated) {
     return orfEntryValue(row, assessment, round, field, section, context);
@@ -144,19 +153,21 @@ function quickWriteEntryValue(
 
   const cws = storedAssessmentNumber(row, assessment, round, cwsField, section, null, context);
   if (typeof cws !== "number") return null;
+  if (quickWriteWorkbookBelowOnePercent(context.grade, round.id, cws)) return "<1%";
 
   const cohortScores = (context.cohortRows ?? [])
     .map((cohortRow) => storedAssessmentNumber(cohortRow, assessment, round, cwsField, section, null, context))
     .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
 
-  return calculatePercentileRank(cws, cohortScores);
+  const percentileRank = calculatePercentileRank(cws, cohortScores);
+  return percentileRank == null ? null : quickWriteEstimatedPercentileRange(percentileRank);
 }
 
 function calculatePercentileRank(score: number, cohortScores: number[]) {
   if (!cohortScores.length) return null;
   const below = cohortScores.filter((value) => value < score).length;
   const equal = cohortScores.filter((value) => value === score).length;
-  return Math.round(((below + equal / 2) / cohortScores.length) * 100);
+  return ((below + equal / 2) / cohortScores.length) * 100;
 }
 
 function percentageEntryValue(
@@ -459,14 +470,23 @@ export function validateAssessmentValue(
     return { valid: true, value: null, error: null };
   }
 
-  if (field.dataType !== "integer" && field.dataType !== "percentage" && field.dataType !== "calculated") {
+  if (assessmentFieldMeaning(field) === "quick_write_percentile") {
+    const percentileRange = normalizeQuickWritePercentileRange(value);
+    return percentileRange
+      ? { valid: true, value: percentileRange, error: null }
+      : { valid: false, value: null, error: `${field.name} must be a percentile from 0 to 100 or a supported range.` };
+  }
+
+  if (field.dataType !== "integer" && field.dataType !== "float" && field.dataType !== "percentage" && field.dataType !== "calculated") {
     return { valid: true, value: String(value), error: null };
   }
 
   const rawValue = typeof value === "string" ? value.trim() : value;
   const numericPattern = field.dataType === "integer"
     ? /^[+-]?\d+$/
-    : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+    : field.dataType === "float"
+      ? /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i
+      : /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
 
   if (typeof rawValue !== "number" && (typeof rawValue !== "string" || !numericPattern.test(rawValue))) {
     return {
@@ -486,8 +506,8 @@ export function validateAssessmentValue(
     return { valid: false, value: null, error: `${field.name} must be a whole number.` };
   }
 
-  const minimum = field.validationConfig?.min ?? 0;
-  const maximum = field.validationConfig?.max ?? (field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER);
+  const minimum = field.validationConfig?.min ?? (field.dataType === "float" ? -Number.MAX_VALUE : 0);
+  const maximum = field.validationConfig?.max ?? (field.dataType === "float" ? Number.MAX_VALUE : field.dataType === "percentage" ? 100 : Number.MAX_SAFE_INTEGER);
   if (numericValue < minimum || numericValue > maximum) {
     return {
       valid: false,
@@ -509,8 +529,9 @@ export function validateAssessmentValue(
 }
 
 function decimalPlaces(value: string | number) {
-  const [, fraction = ""] = String(value).split(".");
-  return fraction.length;
+  const [coefficient, exponent = "0"] = String(value).toLowerCase().split("e");
+  const [, fraction = ""] = coefficient.split(".");
+  return Math.max(0, fraction.length - Number(exponent));
 }
 
 export function validateAssessmentTableEdit(

@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/prepare-pdf-worker.mjs",
+    "prebuild": "node scripts/prepare-pdf-worker.mjs",
     "dev": "next dev",
     "build": "next build",
     "deploy:production": "powershell -ExecutionPolicy Bypass -File scripts/deploy-production-vercel.ps1",
@@ -17,6 +19,7 @@
     "ag-grid-react": "latest",
     "firebase": "latest",
     "next": "latest",
+    "pdfjs-dist": "6.3.289",
     "react": "latest",
     "react-dom": "latest",
     "recharts": "latest",

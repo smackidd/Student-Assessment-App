@@ -1,3 +1,11 @@
+import type { AssessmentDataType } from "./assessment-templates";
+
+export function averageDashboardValues(values: number[], dataType: AssessmentDataType) {
+  if (!values.length) return null;
+  const average = values.reduce((total, value) => total + value, 0) / values.length;
+  return dataType === "float" ? average : Math.round(average * 10) / 10;
+}
+
 export type DashboardChartAxisPoint = {
   axisKey: string;
   year: string;

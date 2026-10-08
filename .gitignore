@@ -1,5 +1,6 @@
 # dependencies
 node_modules/
+/public/pdfjs/
 
 # Next.js
 .next/
@@ -16,6 +17,7 @@ dist/
 coverage/
 test-results/
 playwright-report/
+.tmp/
 
 # TypeScript
 *.tsbuildinfo

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeAuditEvents, sortAuditEvents, type OrganizationAuditEvent } from "@/lib/audit-events";
+import { isImportAuditEvent, mergeAuditEvents, sortAuditEvents, type OrganizationAuditEvent } from "@/lib/audit-events";
 
 function auditEvent(id: string, actor: string, createdAt: string, extra: Partial<OrganizationAuditEvent> = {}): OrganizationAuditEvent {
   return {
@@ -23,9 +23,9 @@ describe("audit events", () => {
     expect(mergeAuditEvents([legacy], [cloud, other])).toEqual([other, cloud]);
   });
 
-  it("derives reverted state from the append-only revert event", () => {
+  it.each(["Imported spreadsheet", "Imported PDF reports"])("derives reverted state for %s from the append-only revert event", (eventType) => {
     const imported = auditEvent("import", "Steve", "2026-08-09T12:00:00.000Z", {
-      eventType: "Imported spreadsheet",
+      eventType,
       importLogId: "import-1"
     });
     const reverted = auditEvent("revert", "Steve", "2026-08-09T13:00:00.000Z", {
@@ -35,6 +35,13 @@ describe("audit events", () => {
 
     const result = mergeAuditEvents([imported, reverted]);
     expect(result.find((event) => event.id === "import")?.revertedAt).toBe(reverted.createdAt);
+  });
+
+  it("recognizes reversible import event types without enabling reversal on other events", () => {
+    expect(isImportAuditEvent("Imported spreadsheet")).toBe(true);
+    expect(isImportAuditEvent("Imported PDF reports")).toBe(true);
+    expect(isImportAuditEvent("Reverted import")).toBe(false);
+    expect(isImportAuditEvent("Edited score")).toBe(false);
   });
 
   it("sorts by Actor without losing rows and preserves tie order", () => {

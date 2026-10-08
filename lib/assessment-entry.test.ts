@@ -219,7 +219,7 @@ describe("assessment entry rows", () => {
     expect(newYearEntry[assessmentValueKey(quickWrite, fall, tww)]).toBeNull();
   });
 
-  it("calculates Quick Write percentile from CWS rank within the current year and grade cohort", () => {
+  it("shows a Quick Write percentile range from CWS rank within the current year and grade cohort", () => {
     const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
     const fall = quickWrite.rounds[0];
     const cws = quickWrite.fields.find((field) => field.id === "cws")!;
@@ -236,9 +236,9 @@ describe("assessment entry rows", () => {
     const entryRows = buildEntryRows(rows, quickWrite, context);
     const percentileKey = assessmentValueKey(quickWrite, fall, percentile);
 
-    expect(entryRows[0][percentileKey]).toBe(17);
-    expect(entryRows[1][percentileKey]).toBe(50);
-    expect(entryRows[2][percentileKey]).toBe(83);
+    expect(entryRows[0][percentileKey]).toBe("1-19% (cohort est.)");
+    expect(entryRows[1][percentileKey]).toBe("40-59% (cohort est.)");
+    expect(entryRows[2][percentileKey]).toBe("80-99% (cohort est.)");
   });
 
   it("keeps the full Quick Write cohort when only one student is rendered", () => {
@@ -257,7 +257,48 @@ describe("assessment entry rows", () => {
 
     const filteredEntry = buildEntryRows([cohortRows[0]], quickWrite, { ...context, cohortRows })[0];
 
-    expect(filteredEntry[assessmentValueKey(quickWrite, fall, percentile)]).toBe(17);
+    expect(filteredEntry[assessmentValueKey(quickWrite, fall, percentile)]).toBe("1-19% (cohort est.)");
+  });
+
+  it("renders a previously stored numeric Quick Write percentile as a range", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const fall = quickWrite.rounds[0];
+    const percentile = quickWrite.fields.find((field) => field.id === "quick-write-percentile")!;
+    const context = { schoolYear: "2025-2026", grade: "3" };
+    const storedKey = assessmentValueKey(quickWrite, fall, percentile, undefined, context);
+    const row = { ...emptyRow(), assessmentValues: { [storedKey]: 17 } };
+
+    expect(buildEntryRows([row], quickWrite, context)[0][assessmentValueKey(quickWrite, fall, percentile)])
+      .toBe("1-19%");
+  });
+
+  it("uses workbook-backed <1% CWS cutoffs only for the supported grade and window", () => {
+    const quickWrite = assessmentTemplates.find((assessment) => assessment.id === "quick-write") as AssessmentTemplate;
+    const cws = quickWrite.fields.find((field) => field.id === "cws")!;
+    const percentile = quickWrite.fields.find((field) => field.id === "quick-write-percentile")!;
+    const cases = [
+      { grade: "3", window: "fall", cws: 0, expected: "40-59% (cohort est.)" },
+      { grade: "3", window: "winter", cws: 0, expected: "<1%" },
+      { grade: "3", window: "winter", cws: 1, expected: "<1%" },
+      { grade: "3", window: "winter", cws: 2, expected: "40-59% (cohort est.)" },
+      { grade: "3", window: "spring", cws: 2, expected: "<1%" },
+      { grade: "3", window: "spring", cws: 3, expected: "40-59% (cohort est.)" },
+      { grade: "4", window: "fall", cws: 0, expected: "<1%" },
+      { grade: "4", window: "fall", cws: 1, expected: "40-59% (cohort est.)" },
+      { grade: "4", window: "winter", cws: 3, expected: "<1%" },
+      { grade: "4", window: "winter", cws: 4, expected: "40-59% (cohort est.)" },
+      { grade: "4", window: "spring", cws: 0, expected: "40-59% (cohort est.)" }
+    ];
+
+    for (const testCase of cases) {
+      const round = quickWrite.rounds.find((candidate) => candidate.id === testCase.window)!;
+      const context = { schoolYear: "2025-2026", grade: testCase.grade };
+      const row = updateAssessmentRowFromTableEdit(
+        emptyRow(), quickWrite, assessmentValueKey(quickWrite, round, cws), testCase.cws, context
+      );
+      const value = buildEntryRows([row], quickWrite, context)[0][assessmentValueKey(quickWrite, round, percentile)];
+      expect(value).toBe(testCase.expected);
+    }
   });
 
   it("calculates Percentage from Score divided by Total in the current section", () => {
