@@ -11,7 +11,7 @@ import {
   googleAuthMethod,
   googleInvitationAccessError,
   googleWorkspaceProfileError,
-  isSchoolEmail,
+  isAllowedInvitationEmail,
   normalizeEmail
 } from "./google-auth-policy.js";
 import {
@@ -40,7 +40,7 @@ if (!getApps().length) initializeApp();
 const region = "northamerica-northeast1";
 const organizationId = "student-assessment";
 const validRoles = ["admin", "teacher_ea"] as const;
-const initialAdminEmail = defineString("INITIAL_ADMIN_EMAIL");
+const approvedExternalEmail = defineString("APPROVED_EXTERNAL_EMAIL", { default: "" });
 const organizationName = defineString("ORGANIZATION_NAME", { default: "Student Evaluations" });
 const applicationUrl = defineString("APPLICATION_URL", {
   default: "https://student-assessment-app.vercel.app"
@@ -147,39 +147,22 @@ export const blockPublicSignUp = beforeUserCreated({ region }, () => {
 
 export const blockUninvitedSignIn = beforeUserSignedIn({ region }, (event) => {
   const user = event.data;
-  const email = normalizeEmail(user?.email);
   const claims = user?.customClaims ?? {};
+  if (claims.organizationId !== organizationId || !isOrganizationRole(claims.role)) {
+    throw new IdentityHttpsError(
+      "permission-denied",
+      "An administrator has not invited this account to the organization."
+    );
+  }
+  const approvedEmail = approvedExternalEmail.value();
   const signInError = googleInvitationAccessError(claims, {
     email: user?.email,
     emailVerified: user?.emailVerified,
     provider: blockingSignInProvider(event)
-  });
+  }, approvedEmail);
   if (signInError) throw new IdentityHttpsError("permission-denied", signInError);
-  const profileError = googleWorkspaceProfileError(claims, event.additionalUserInfo?.profile);
+  const profileError = googleWorkspaceProfileError(claims, event.additionalUserInfo?.profile, approvedEmail);
   if (profileError) throw new IdentityHttpsError("permission-denied", profileError);
-
-  // An existing role takes precedence over bootstrap configuration, including
-  // when the configured initial administrator was later assigned another role.
-  if (claims.organizationId === organizationId && isOrganizationRole(claims.role)) return;
-
-  if (
-    claims.authMethod !== googleAuthMethod &&
-    !claims.organizationId &&
-    email && email === normalizeEmail(initialAdminEmail.value())
-  ) {
-    return {
-      customClaims: {
-        ...claims,
-        organizationId,
-        role: "admin"
-      }
-    };
-  }
-
-  throw new IdentityHttpsError(
-    "permission-denied",
-    "An administrator has not invited this account to the organization."
-  );
 });
 
 export const initializeOrganizationAccess = onCall({ region }, async (request) => {
@@ -188,36 +171,18 @@ export const initializeOrganizationAccess = onCall({ region }, async (request) =
   if (auth.organizationId === organizationId && existingRole) {
     return { active: true, role: existingRole };
   }
-
-  const email = normalizeEmail(auth.email);
-  if (
-    auth.authMethod === googleAuthMethod ||
-    auth.organizationId ||
-    !email || email !== normalizeEmail(initialAdminEmail.value())
-  ) {
-    return { active: false };
-  }
-
-  const hasAdmin = (await organizationUsers()).some((user) => user.customClaims?.role === "admin");
-  if (hasAdmin) return { active: false };
-
-  const user = await getAuth().getUser(auth.uid);
-  await getAuth().setCustomUserClaims(auth.uid, {
-    ...user.customClaims,
-    organizationId,
-    role: "admin"
-  });
-  return { active: true, role: "admin" as const };
+  // Membership and the initial Admin are issued by a trusted administrator or
+  // the controlled migration. Signing in never grants or promotes a role.
+  return { active: false };
 });
-
 export const inviteUser = onCall(
   { region },
   async (request: CallableRequest<InviteRequest>) => {
     requireAdmin(request);
 
     const email = requiredEmail(request.data.email);
-    if (!isSchoolEmail(email)) {
-      throw new HttpsError("invalid-argument", "Invite a foothillsacademy.org email address.");
+    if (!isAllowedInvitationEmail(email, approvedExternalEmail.value())) {
+      throw new HttpsError("invalid-argument", "Invite a foothillsacademy.org email address or the approved outside account.");
     }
     const displayName = requiredText(request.data.displayName, "name");
     const role = requiredRole(request.data.role);
@@ -543,7 +508,7 @@ function requireSignedIn(request: CallableRequest<unknown>) {
     email: token.email,
     emailVerified: token.email_verified,
     provider: token.firebase?.sign_in_provider
-  });
+  }, approvedExternalEmail.value());
   if (signInError) throw new HttpsError("permission-denied", signInError);
   return token;
 }
@@ -884,7 +849,7 @@ async function queueInvitationEmail(input: {
           "",
           `An Admin invited you to ${organizationName.value()} as ${roleLabel(input.role)}.`,
           `Open the app below and choose Sign in with Google using ${input.email}.`,
-          "Your invitation only accepts this foothillsacademy.org Google account. You do not need to create a password.",
+          "Your invitation only accepts this exact Google account. You do not need to create a password.",
           "",
           input.actionLink,
           "",
@@ -916,7 +881,7 @@ function invitationHtml(input: {
       <p>Hello ${escapeHtml(input.displayName)},</p>
       <p>An Admin invited you as <strong>${escapeHtml(roleLabel(input.role))}</strong>.</p>
       <p>Open the app and choose <strong>Sign in with Google</strong> using <strong>${escapeHtml(input.email)}</strong>.</p>
-      <p>Your invitation only accepts this foothillsacademy.org Google account. You do not need to create a password.</p>
+      <p>Your invitation only accepts this exact Google account. You do not need to create a password.</p>
       <p style="margin:28px 0">
         <a href="${escapeHtml(input.actionLink)}" style="background:#111923;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none;font-weight:700">
           Open app

@@ -12,17 +12,27 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return signedIn() && email() == 'stevemackidd@gmail.com';
+      return googleOrganizationMember() && request.auth.token.role == 'admin';
+    }
+
+    function googleOrganizationMember() {
+      return signedIn()
+        && request.auth.token.organizationId == 'student-assessment'
+        && request.auth.token.role in ['admin', 'teacher_ea']
+        && request.auth.token.authMethod == 'google'
+        && request.auth.token.firebase.sign_in_provider == 'google.com'
+        && request.auth.token.email_verified == true
+        && email() == request.auth.token.invitedEmail;
     }
 
     function isOrganizationAdmin(orgId) {
-      return signedIn()
+      return googleOrganizationMember()
         && request.auth.token.organizationId == orgId
         && request.auth.token.role == 'admin';
     }
 
     function canUseRun() {
-      return signedIn();
+      return googleOrganizationMember();
     }
 
     function validMember(userId) {
@@ -112,18 +122,18 @@ service cloud.firestore {
 
       match /members/{userId} {
         allow get: if isAdmin()
-          || (signedIn() && userId == request.auth.uid)
+          || (canUseRun() && userId == request.auth.uid)
           || canUseRun();
         allow list: if canUseRun();
-        allow create: if signedIn()
+        allow create: if canUseRun()
           && userId == request.auth.uid
           && validMember(userId);
         allow update: if (
             isAdmin()
-            || (signedIn() && userId == request.auth.uid && resource.data.uid == request.auth.uid)
+            || (canUseRun() && userId == request.auth.uid && resource.data.uid == request.auth.uid)
           ) && validMember(userId);
         allow delete: if isAdmin()
-          || (signedIn() && userId == request.auth.uid && resource.data.uid == request.auth.uid);
+          || (canUseRun() && userId == request.auth.uid && resource.data.uid == request.auth.uid);
       }
 
       match /responses/{responseId} {

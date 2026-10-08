@@ -1,97 +1,52 @@
-# Invite-only authentication
+# Invite-only Google authentication
 
-## Decision
+## Decision and scope
 
-**2026-09-18: LOCAL ONLY.** The Google invitation workflow is being prepared on a local branch. It has not been deployed or applied to `student-assessment-test` or production. No provider settings, remote accounts, invitation email queues, or database records have been changed for this work. See `MIG-20260918-001` in [migrations.md](migrations.md).
+On 2026-10-08 the owner authorized merging master into `feature/foothills-google-sso`, completing the school-only policy with one exact outside email exception, and deploying to Test. Production remains pending. See `MIG-20261008-001` in [migrations.md](migrations.md).
 
-New invitations, and pending invitations reissued through the updated Admin flow, require **Sign in with Google** using the exact invited `foothillsacademy.org` Google Workspace account. The server enforces invitation membership, the current Google sign-in provider, verified email, the exact invited email, and Google's hosted domain. Gmail addresses, other domains, subdomains, and uninvited school accounts do not qualify for a new invitation.
+Every organization member must use Sign in with Google. Foothills staff require an exact `foothillsacademy.org` email and Google's trusted Workspace hosted domain. One outside address may be authorized through the server-only `APPROVED_EXTERNAL_EMAIL` Function parameter; empty or invalid configuration disables that exception. Every allowed account still needs an existing administrator-issued membership and role. Google sign-in never creates membership or promotes an Admin.
 
-Existing active accounts are not migrated. Their existing sign-in method and claims remain compatible until a separate migration is approved. Google SSO does not introduce Firebase MFA or a new email-verification workflow for those legacy accounts.
+## Invitations
 
-## Roles
+1. An Admin enters the person's name, exact email and role. The server accepts a school address or the one configured outside address.
+2. The Admin SDK reserves the Firebase user without a password, preserving a pending reservation's UID. It assigns `organizationId`, `role`, `authMethod: "google"`, and normalized `invitedEmail` claims, preserving classroom and other existing claims.
+3. The server queues the Google sign-in instructions through the existing Trigger Email extension. The email links to the configured app URL with `invited=google`. It grants no access by itself and contains no password setup link.
+4. The app signs out any current browser account before the invitation handoff, then presents Google sign-in. Old `invited=1` links also lead to Google sign-in after migration.
+5. Google authenticates the exact invited account. Firebase's one-account-per-email setting must retain the existing or reserved UID and custom claims. The assigned Admin or Teacher / EA permissions continue to apply.
 
-- **Admin** can invite users, assign roles, view the organization user list, and change another user's role.
-- **Teacher / EA** can sign in to the assessment workspace but cannot invite users or change roles.
+An uninvited school account, another invited person's Google account, any other outside account, consumer Google account pretending to be school-managed, unverified identity, and password sign-in are rejected.
 
-Firebase Auth custom claims are the source of truth. New and reissued invitations include:
+## Identity enforcement
 
-```json
-{
-  "organizationId": "student-assessment",
-  "role": "teacher_ea",
-  "authMethod": "google",
-  "invitedEmail": "staff@foothillsacademy.org"
-}
-```
+The blocking sign-in Function checks organization membership, role, migration marker, current Google provider, verified Firebase email, exact invitation binding and trusted Google profile. The school profile must have `hd: "foothillsacademy.org"`. The browser supplies no school-only account chooser filter so the approved outside account remains selectable.
 
-The Admin claim uses `"role": "admin"`; Teacher / EA uses `"role": "teacher_ea"`. The normalized `invitedEmail` binds access to the account the Admin invited. Role and classroom assignment updates preserve the authentication-policy claims.
+The exact outside account must use Gmail or a managed Google Workspace mailbox. A non-Google-hosted mailbox merely registered as a Google account is not supported by this implementation; it would need a separately implemented mailbox-verification enrollment flow. Managed Workspace aliases are supported when Google supplies a trusted hosted domain, even if the alias suffix differs. Optional profile verification fields must agree when supplied.
 
-Role values saved in browser state or the prototype workspace JSON are not trusted for authorization.
+Callable Functions independently enforce Google provider, verified email, exact invitation identity, and the current configured allowlist. The client uses the same signed membership marker/provider/email binding before showing the workspace. Initial-Admin bootstrap no longer grants or promotes roles.
 
-## Invitation flow
+Direct resource authorization must also reject old unmarked/password tokens. `scripts/stage-test-google-sso-resources.cjs` creates ignored Test-only source with matching Google, verified-email, school/exact-outside and identity-binding guards for four direct SQL Connect operations, Firestore and Storage. It preserves all `NO_ACCESS` operations, existing Storage role restrictions and canonical workspace-root source. Deploy only the SQL Connect connector selector, not its schema. Stale sessions may read only their own server-owned access-change/revocation notification so the browser can sign out; they cannot write those notifications.
 
-1. An Admin enters a name, `foothillsacademy.org` email, and role in the Team tab.
-2. The `inviteUser` callable verifies the caller's Firebase ID token and Admin claim, then rejects invitations outside the exact school domain.
-3. The Admin SDK reserves a Firebase Auth user with that email and **no password**. The email starts unverified. A pending reservation can be reused with the same UID; an already active organization member cannot be reinvited through this flow.
-4. The function assigns the organization, role, `authMethod: "google"`, and normalized `invitedEmail` claims, then revokes existing refresh tokens. Reissuing a pending legacy invitation applies this policy without deleting the user's UID. It does not remove any old password credential; the Google-only guard rejects password sign-in even if an old reset link is used.
-5. The function queues a branded invitation in the server-only Firestore `mail` collection. The configured Trigger Email extension delivers it through Gmail SMTP. Both text and HTML tell the recipient to choose Google with their invited account and explain that no application password is needed.
-6. The email links directly to the configured `APPLICATION_URL` with `invited=google`. This is an app handoff link, not a credential, password-reset link, or one-time access token. Forwarding it grants no access.
-7. The app waits for Firebase Auth initialization, signs out any current browser account, removes the handoff query parameter, and presents Google sign-in with an account chooser. The `invited=google` handoff hides the password form. Existing `invited=1` links remain supported for legacy password invitations and retain access to password sign-in. The browser's `hd` option guides account selection only.
-8. With one account per email enabled, the verified Google identity is expected to attach to the reserved Firebase Auth UID. The blocking function verifies the invitation before Firebase issues a session; the app then reads the signed claims and exposes the assigned role's features. UID retention and real provider metadata remain required integration checks before release.
+## Test account migration and release
 
-The `blockPublicSignUp` blocking function continues to reject all client-created accounts. The reservation exists before the recipient signs in, so a valid invited user signs into an existing account. An uninvited Google account cannot create itself through public sign-up.
+Before remote writes, record the release in the migration ledger. Deploy reviewed blocking/callable Functions and Google provider configuration explicitly to `student-assessment-test`. `firebase.auth-test.json` is the Test-only Google provider definition; its CLI setup requires Firebase CLI 15.6.0 or newer. The OAuth audience must support External accounts; the app's membership policy restricts access. Authorized origins and the provider callback must match Test. Email/password can be disabled after the reviewed account migration; existing credentials are retained for recovery.
 
-## Server enforcement and legacy compatibility
+The controlled migration tool [google-sso-migration.md](google-sso-migration.md) defaults to a reviewed dry run. Applying it requires exact Test project assertions and the reviewed plan hash, provider readiness, an eligible enabled Admin, and a Windows CurrentUser DPAPI recovery snapshot before any write. It retains user IDs, roles, grade/homeroom, unrelated claims and credentials, then revokes eligible users' refresh tokens. Excluded accounts are unchanged and the strict policy rejects their app access.
 
-For accounts marked `authMethod: "google"`, `blockUninvitedSignIn` requires all of the following:
+Do not copy Test user or student records to Production. No SQL schema or student-data migration is part of this release. Changing the outside exception later requires regenerating the direct-resource guards and reviewing/revoking that account's existing sessions. Existing Google ID tokens have a finite lifetime; refresh-token revocation alone does not immediately invalidate every previously issued token.
 
-- Current sign-in metadata identifies `google.com`; linked providers alone do not satisfy this check.
-- The Firebase email is verified, belongs to the exact school domain, and matches the normalized `invitedEmail` claim.
-- The Google profile supplied by Firebase has `hd: "foothillsacademy.org"` and an email matching `invitedEmail`. Missing or inconsistent metadata fails closed.
-- The existing organization claim and valid Admin or Teacher / EA role grant membership.
+## Verification boundaries
 
-Callable authentication guards independently check marked tokens' `firebase.sign_in_provider`, verified email, and invited-email binding. Password sign-in cannot satisfy this policy merely because Google is linked to the account. Client validation is an additional usability check, not the access boundary.
+Offline policy and migration tests cover exact-email exceptions, wrong domains/provider/account, missing claims, legacy session rejection, role preservation, stale-plan guards and recovery ordering. App and Function builds and typechecks must pass before deployment.
 
-Unmarked legacy accounts keep the existing policy. Initial-Admin compatibility is limited to unmarked accounts without an existing organization claim whose email matches `INITIAL_ADMIN_EMAIL`; existing assigned roles take precedence. The `initializeOrganizationAccess` fallback also checks that no organization Admin exists. A marked Google account cannot use either bootstrap path to bypass invitation policy or promote its role.
-
-Blocking checks run during sign-in; they do not continuously revalidate existing sessions with Google Workspace. Revoking refresh tokens does not immediately invalidate every already issued ID token. Any later bulk migration or immediate account-removal requirement needs a separately reviewed session and resource-authorization plan.
-
-## Future Firebase setup and release gates
-
-These steps are pending and require a separately authorized test rollout. Do not run deployments, create remote users, send invitations, or change provider settings as part of the current local work.
-
-1. Review the project-specific Firebase Authentication configuration, retaining Identity Platform and both registered blocking functions. Enable the Google provider in the authorized test environment, with its approved support email and OAuth configuration.
-2. Require **one account per email** / **Link accounts that use the same email**. Multiple accounts per provider would undermine the reserved-UID flow. Verify the first Google sign-in retains both the reservation's UID and custom claims.
-3. Configure only the approved application origins in Authentication's authorized domains, including localhost if a later authorized local-to-test OAuth check needs it. Confirm the school permits this OAuth application in Google Workspace.
-4. Retain Email/Password for the active legacy users while the Google-only blocking policy protects marked invitations. Disabling it globally or migrating existing users is a separate decision.
-5. Verify that `APPLICATION_URL` points to the intended environment and that the existing Trigger Email extension is configured as intended. An invitation call writes to `mail` and can send an actual message; use an explicitly approved test recipient or email sink during future integration testing. The checked-in `extensions/firestore-send-email.env.example` describes configuration; keep actual SMTP values out of Git.
-6. Deploy the reviewed blocking functions, callable guards/invitation changes, and compatible web application to test only after authorization. Record the precise applied revision and evidence in the migration ledger before considering a separate production release.
-
-Relevant existing Function parameters are:
-
-- `INITIAL_ADMIN_EMAIL`: the exact email for the first Admin.
-- `ORGANIZATION_NAME`: the name shown in invitation emails.
-- `APPLICATION_URL`: the environment's application URL used for the invitation handoff.
-
-Before promotion, verify a real managed school account supplies `additionalUserInfo.profile.hd` and the expected profile email to the blocking function on both first and subsequent Google sign-ins. Missing `hd` must remain a rejection. The Firebase Auth emulator's fake Google profile may omit this field, so mocked policy tests alone do not prove the real OAuth flow.
-
-The future integration checklist includes: first invite and repeat sign-in with the reserved UID; another school account; uninvited school account; consumer Google account or wrong hosted domain; Gmail and subdomain rejection; missing/unverified/mismatched email; password-reset and linked-password attempts against marked accounts; pending legacy invitation reissue; active legacy Admin sign-in; assigned-role preservation; invitation handoff from another browser account; and actual email delivery to the approved recipient. Local tests and isolated browser rendering do not establish these remote integration results.
-
-For rollback after rollout, stop issuing new invitations while investigating and prefer a forward fix. Keep the Google-only blocking and callable guards for every marked account; do not clear `authMethod`/`invitedEmail` or restore permissive guards as a shortcut. Reverting only the web interface can make Google users unable to sign in, so retain a compatible Google sign-in route. No Cloud SQL/Data Connect schema or data migration is part of this authentication change.
-
-## Local validation
-
-The full offline test suite, application and Functions typechecks, and application and Functions builds passed. Local browser rendering was checked with dummy Firebase configuration and a Content Security Policy that denied outbound connections. This exercised the local interface without sending requests to configured test or production Firebase services.
-
-These checks do not verify real Google OAuth, provider enablement, managed-school profile metadata, reserved-UID linking, or invitation email delivery. Those integration checks remain pending for a separately authorized test rollout.
+Real Google OAuth must still prove: first reserved/existing-account sign-in retains UID and claims; school profiles deliver trusted `hd` on first and repeat sign-in; approved outside access succeeds; other school/outside/password attempts fail; classroom restrictions and assigned roles survive migration. Actual invitation delivery requires an explicitly authorized recipient. No invitation email is sent merely by deployment or migration.
 
 ## Official references
 
-- [Firebase Google sign-in for web](https://firebase.google.com/docs/auth/web/google-signin): provider setup and popup sign-in.
-- [Firebase blocking functions](https://firebase.google.com/docs/auth/extend-with-blocking-functions): current sign-in event metadata and checks before token issuance.
-- [Google account and hosted-domain verification](https://developers.google.com/identity/sign-in/ios/backend-auth): why `hd` distinguishes managed Workspace accounts from consumer accounts using external email.
-- [Identity Platform account linking](https://cloud.google.com/identity-platform/docs/link-accounts): one-account-per-email configuration and credential conflicts.
-- [Firebase Auth emulator implementation](https://github.com/firebase/firebase-tools/blob/master/src/emulator/auth/operations.ts): source-level evidence for verified-IdP reuse of an existing email reservation; this is not a substitute for the pending real-provider integration test.
+- [Firebase Google sign-in](https://firebase.google.com/docs/auth/web/google-signin)
+- [Firebase provider configuration with CLI](https://firebase.google.com/docs/auth/configure-providers-cli)
+- [Firebase blocking functions](https://firebase.google.com/docs/auth/extend-with-blocking-functions)
+- [Google hosted-domain and mailbox verification](https://developers.google.com/identity/sign-in/web/backend-auth)
+- [Google OAuth audience](https://support.google.com/cloud/answer/15549945)
 
 ## SQL Connect hardening and APP-079 rollout
 

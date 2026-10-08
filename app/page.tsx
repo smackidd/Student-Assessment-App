@@ -30,12 +30,9 @@ import {
 } from "recharts";
 import * as XLSX from "xlsx-js-style";
 import {
-  EmailAuthProvider,
   getAuth,
   onIdTokenChanged,
-  reauthenticateWithCredential,
   signOut,
-  updatePassword,
   updateProfile,
   type User
 } from "firebase/auth";
@@ -142,7 +139,7 @@ import {
 } from "@/lib/team-assignments";
 import { firebaseApp } from "@/lib/firebase";
 import { AuthScreen } from "@/components/auth-screen";
-import { isSchoolEmail, schoolEmailDomain } from "@/lib/google-sign-in";
+import { isInviteEmail, schoolEmailDomain } from "@/lib/google-sign-in";
 import { prepareInvitationHandoff, type InvitationSignInMethod } from "@/lib/invitation-handoff";
 import { hydrateOrfRow, type OrfResultRow } from "@/lib/sample-results";
 import { studentRowsNeedingSqlSync } from "@/lib/student-sync";
@@ -289,7 +286,6 @@ type OverviewDialog =
 export default function StudentEvaluationApp() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [googleOnlyAccount, setGoogleOnlyAccount] = useState(false);
   const [invitationSignInMethod, setInvitationSignInMethod] = useState<InvitationSignInMethod | null>(null);
   const [templates, setTemplates] = useState<AssessmentTemplate[]>(assessmentTemplates);
   const [selectedId, setSelectedId] = useState(assessmentTemplates[0].id);
@@ -492,7 +488,6 @@ export default function StudentEvaluationApp() {
         setAuthUser(user);
         if (accountChanged) {
           setAuthReady(false);
-          setGoogleOnlyAccount(false);
           setOrganizationAccess("checking");
           setWorkspaceReadyForUid(null);
           setNavigationReadyForUid(null);
@@ -528,8 +523,11 @@ export default function StudentEvaluationApp() {
         try {
           const membership = await resolveOrganizationAccess(user);
           if (!isCurrentSession()) return;
+          if (membership.requiresGoogleSignIn) {
+            await signOut(auth);
+            return;
+          }
           setOrganizationAccess(membership.access);
-          setGoogleOnlyAccount(membership.googleOnly);
           if (!membership.role) setTeamMembers([]);
           if (membership.role) {
             setCurrentUserRole(membership.role);
@@ -2005,7 +2003,6 @@ export default function StudentEvaluationApp() {
           />
         ) : activeView === "profile" ? (
           <ProfilePage
-            googleOnlyAccount={googleOnlyAccount}
             isAdmin={isAdmin}
             activeTab={profilePageTab}
             setActiveTab={setProfilePageTab}
@@ -2207,15 +2204,6 @@ function PendingInviteScreen({ email, onSignOut }: { email: string; onSignOut: (
   );
 }
 
-function friendlyAuthError(error: unknown) {
-  const message = error instanceof Error ? error.message : "";
-  if (message.includes("auth/invalid-credential")) return "That email and password did not match an account.";
-  if (message.includes("auth/email-already-in-use")) return "That email already has an account. Try signing in.";
-  if (message.includes("auth/weak-password")) return "Use a password with at least 6 characters.";
-  if (message.includes("auth/operation-not-allowed")) return "Email/password sign-in is not enabled in Firebase yet.";
-  return message || "Something went wrong with sign-in.";
-}
-
 function isRemovedAuthSession(error: unknown) {
   const message = error instanceof Error ? error.message : "";
   return [
@@ -2239,14 +2227,6 @@ function friendlyCallableError(error: unknown) {
     return "Firebase could not save the team access change. Try again or refresh the Team list.";
   }
   return message.replace(/^Firebase:\s*/i, "") || "The request could not be completed.";
-}
-
-function friendlyPasswordError(error: unknown) {
-  const message = error instanceof Error ? error.message : "";
-  if (message.includes("auth/invalid-credential")) return "The current password did not match.";
-  if (message.includes("auth/requires-recent-login")) return "Please sign out, sign back in, and try changing your password again.";
-  if (message.includes("auth/weak-password")) return "Use a password with at least 6 characters.";
-  return message || "Password change failed.";
 }
 
 function assessmentDefinitionSnapshot(template: AssessmentTemplate): AssessmentDefinitionSnapshot {
@@ -4556,7 +4536,6 @@ function uniqueDashboardRounds(assessments: AssessmentTemplate[]) {
 }
 
 function ProfilePage({
-  googleOnlyAccount,
   isAdmin,
   activeTab,
   setActiveTab,
@@ -4580,7 +4559,6 @@ function ProfilePage({
   saveMessage,
   onSave
 }: {
-  googleOnlyAccount: boolean;
   isAdmin: boolean;
   activeTab: ProfilePageTab;
   setActiveTab: (tab: ProfilePageTab) => void;
@@ -4608,11 +4586,6 @@ function ProfilePage({
   onSave: () => Promise<void>;
 }) {
   const visibleTab = isAdmin || activeTab === "password" ? activeTab : "profile";
-  const [currentPassword, setCurrentPassword] = useState("");
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [passwordStatus, setPasswordStatus] = useState<"idle" | "saving" | "success" | "error">("idle");
-  const [passwordMessage, setPasswordMessage] = useState("Use your current password to set a new one.");
   const [roleUpdatingId, setRoleUpdatingId] = useState<string | null>(null);
   const [memberDeletingId, setMemberDeletingId] = useState<string | null>(null);
   const [memberPendingDelete, setMemberPendingDelete] = useState<TeamMember | null>(null);
@@ -4655,41 +4628,6 @@ function ProfilePage({
     }
   }
 
-  async function changePassword() {
-    if (googleOnlyAccount) return;
-    if (!authUser?.email) {
-      setPasswordStatus("error");
-      setPasswordMessage("Sign in with an email account before changing your password.");
-      return;
-    }
-    if (newPassword.length < 6) {
-      setPasswordStatus("error");
-      setPasswordMessage("Use a password with at least 6 characters.");
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setPasswordStatus("error");
-      setPasswordMessage("The new passwords do not match.");
-      return;
-    }
-
-    setPasswordStatus("saving");
-    setPasswordMessage("Updating password...");
-    try {
-      const credential = EmailAuthProvider.credential(authUser.email, currentPassword);
-      await reauthenticateWithCredential(authUser, credential);
-      await updatePassword(authUser, newPassword);
-      setCurrentPassword("");
-      setNewPassword("");
-      setConfirmPassword("");
-      setPasswordStatus("success");
-      setPasswordMessage("Password changed.");
-    } catch (error) {
-      setPasswordStatus("error");
-      setPasswordMessage(friendlyPasswordError(error));
-    }
-  }
-
   return (
     <section className="profile-layout">
       <div className="panel profile-hero">
@@ -4706,7 +4644,7 @@ function ProfilePage({
           Profile
         </button>
         <button className={visibleTab === "password" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("password")} type="button">
-          {googleOnlyAccount ? "Account security" : "Change Password"}
+          Account security
         </button>
         {isAdmin ? (
           <>
@@ -4755,52 +4693,11 @@ function ProfilePage({
         </div>
       ) : null}
 
-      {visibleTab === "password" && googleOnlyAccount ? (
+      {visibleTab === "password" ? (
         <section className="panel">
           <h2>Google account security</h2>
-          <p>You sign in with your school Google account. Manage your password through Google or contact your school administrator.</p>
+          <p>You sign in with your invited Google account. Manage account security through Google. Foothills staff can contact their school administrator for help.</p>
         </section>
-      ) : visibleTab === "password" ? (
-        <div className="panel profile-form password-form">
-          <label>
-            Current password
-            <input
-              autoComplete="current-password"
-              type="password"
-              value={currentPassword}
-              onChange={(event) => setCurrentPassword(event.target.value)}
-            />
-          </label>
-          <label>
-            New password
-            <input
-              autoComplete="new-password"
-              type="password"
-              value={newPassword}
-              onChange={(event) => setNewPassword(event.target.value)}
-            />
-          </label>
-          <label>
-            Confirm new password
-            <input
-              autoComplete="new-password"
-              type="password"
-              value={confirmPassword}
-              onChange={(event) => setConfirmPassword(event.target.value)}
-            />
-          </label>
-          <div className={`password-action ${passwordStatus}`}>
-            <button
-              className="primary-action"
-              disabled={passwordStatus === "saving" || !currentPassword || !newPassword || !confirmPassword}
-              onClick={changePassword}
-              type="button"
-            >
-              {passwordStatus === "saving" ? "Changing..." : "Change Password"}
-            </button>
-            <span>{passwordMessage}</span>
-          </div>
-        </div>
       ) : null}
 
       {visibleTab === "audit" ? (
@@ -4951,8 +4848,8 @@ function InviteModal({
   const [role, setRole] = useState<UserRole>("Teacher / EA");
   const [status, setStatus] = useState<"idle" | "sending" | "error">("idle");
   const [message, setMessage] = useState("");
-  const validSchoolEmail = isSchoolEmail(email);
-  const inviteReady = Boolean(validSchoolEmail && name.trim());
+  const validInviteEmail = isInviteEmail(email);
+  const inviteReady = Boolean(validInviteEmail && name.trim());
 
   async function sendInvite() {
     if (!inviteReady) return;
@@ -4996,7 +4893,7 @@ function InviteModal({
               value={email}
               onChange={(event) => setEmail(event.target.value)}
               placeholder={`name@${schoolEmailDomain}`}
-              aria-invalid={Boolean(email.trim() && !validSchoolEmail)}
+              aria-invalid={Boolean(email.trim() && !validInviteEmail)}
               aria-describedby="invite-domain-help"
             />
           </label>
@@ -5012,7 +4909,7 @@ function InviteModal({
           </label>
         </div>
         <p className="invite-explainer" id="invite-domain-help">
-          Invite a {schoolEmailDomain} email address. The user will receive an invitation to sign in with that school Google account. No app password is needed.
+          Invite a {schoolEmailDomain} address or the approved outside account. The recipient must sign in with Google using that exact email address.
         </p>
         {message ? <div className="auth-message">{message}</div> : null}
         <div className="modal-actions">

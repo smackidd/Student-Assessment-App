@@ -2,6 +2,7 @@ import { getFunctions, httpsCallable } from "firebase/functions";
 import { doc, getFirestore, onSnapshot } from "firebase/firestore";
 import type { User } from "firebase/auth";
 import { firebaseApp } from "@/lib/firebase";
+import { hasGoogleOrganizationAccess } from "@/lib/google-organization-access";
 
 export const organizationId = "student-assessment";
 export const roles = ["Admin", "Teacher / EA"] as const;
@@ -30,13 +31,6 @@ type CallableMember = {
   homeroom?: string | null;
 };
 
-type AccessResult = {
-  active: boolean;
-  role?: RoleClaim;
-  grade?: string | null;
-  homeroom?: string | null;
-};
-
 function organizationFunctions() {
   return getFunctions(
     firebaseApp,
@@ -55,33 +49,15 @@ export function roleToClaim(role: UserRole): RoleClaim {
 }
 
 export async function resolveOrganizationAccess(user: User) {
-  let token = await user.getIdTokenResult();
-  let role = roleFromClaim(token.claims.role);
-  let grade = textFromClaim(token.claims.grade);
-  let homeroom = textFromClaim(token.claims.homeroom);
-  let active = token.claims.organizationId === organizationId && role !== null;
-
-  if (!active) {
-    const initializeAccess = httpsCallable<Record<string, never>, AccessResult>(
-      organizationFunctions(),
-      "initializeOrganizationAccess"
-    );
-    const result = await initializeAccess({});
-    if (result.data.active) {
-      token = await user.getIdTokenResult(true);
-      role = roleFromClaim(token.claims.role);
-      grade = textFromClaim(token.claims.grade);
-      homeroom = textFromClaim(token.claims.homeroom);
-      active = token.claims.organizationId === organizationId && role !== null;
-    }
-  }
-
+  const token = await user.getIdTokenResult();
+  const active = hasGoogleOrganizationAccess(token.claims);
   return {
-    googleOnly: token.claims.authMethod === "google",
+    googleOnly: active,
+    requiresGoogleSignIn: !active && token.claims.organizationId === organizationId && roleFromClaim(token.claims.role) !== null,
     access: active ? ("active" as const) : ("uninvited" as const),
-    role,
-    grade,
-    homeroom
+    role: active ? roleFromClaim(token.claims.role) : null,
+    grade: active ? textFromClaim(token.claims.grade) : "",
+    homeroom: active ? textFromClaim(token.claims.homeroom) : ""
   };
 }
 

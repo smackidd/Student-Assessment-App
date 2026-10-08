@@ -10,9 +10,10 @@
     "deploy:production": "powershell -ExecutionPolicy Bypass -File scripts/deploy-production-vercel.ps1",
     "deploy:test": "powershell -ExecutionPolicy Bypass -File scripts/deploy-test-vercel.ps1",
     "start": "next start",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:guards",
     "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:guards": "node --test scripts/clear-test-year.test.cjs scripts/repair-import-values.test.cjs scripts/migrate-test-google-sso.test.cjs scripts/stage-test-google-sso-resources.test.cjs"
   },
   "dependencies": {
     "ag-grid-community": "latest",

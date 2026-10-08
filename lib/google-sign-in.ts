@@ -6,15 +6,19 @@ export function isSchoolEmail(email: string) {
   return /^[^\s@]+@foothillsacademy\.org$/i.test(email.trim());
 }
 
-export async function signInWithSchoolGoogle(auth: Auth) {
+export function isInviteEmail(email: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+}
+
+export async function signInWithOrganizationGoogle(auth: Auth) {
   const provider = new GoogleAuthProvider();
-  // The hosted-domain parameter guides account selection. The blocking Function
-  // enforces the actual invitation, provider and verified email on the server.
-  provider.setCustomParameters({ hd: schoolEmailDomain, prompt: "select_account" });
+  // Keep the approved outside account available in the account chooser.
+  // The server enforces invitation membership and the exact-email policy.
+  provider.setCustomParameters({ prompt: "select_account" });
   const credential = await signInWithPopup(auth, provider);
-  if (!credential.user.emailVerified || !isSchoolEmail(credential.user.email ?? "")) {
+  if (!credential.user.emailVerified || !isInviteEmail(credential.user.email ?? "")) {
     await signOut(auth);
-    throw new Error(`Use your invited ${schoolEmailDomain} Google account.`);
+    throw new Error("Use the verified Google account that received your invitation.");
   }
   return credential.user;
 }
@@ -36,7 +40,7 @@ export function googleSignInError(error: unknown) {
   if (code === "auth/network-request-failed") return "Unable to reach Google sign-in. Check your connection and try again.";
   if (code === "auth/user-disabled") return "This account has been disabled. Contact your administrator.";
   if (code === "auth/internal-error" || code === "auth/blocking-function-error") {
-    return `Google sign-in could not be completed. Use the exact ${schoolEmailDomain} account your administrator invited, or contact your administrator.`;
+    return "Google sign-in could not be completed. Use the exact account your administrator invited, or contact your administrator.";
   }
   return error instanceof Error ? error.message : "Google sign-in could not be completed. Try again.";
 }

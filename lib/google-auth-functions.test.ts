@@ -14,7 +14,8 @@ const fixtures = vi.hoisted(() => {
       generatePasswordResetLink: vi.fn(), getUser: vi.fn(), listUsers: vi.fn()
     },
     queueMail: vi.fn(),
-    initialAdmin: "bootstrap@foothillsacademy.org"
+    initialAdmin: "bootstrap@foothillsacademy.org",
+    approvedExternalEmail: ""
   };
 });
 
@@ -34,7 +35,7 @@ vi.mock("../functions/node_modules/firebase-admin/lib/esm/firestore/index.js", (
 }));
 vi.mock("../functions/node_modules/firebase-functions/lib/esm/params/index.mjs", () => ({
   defineString: (name: string, options?: { default: string }) => ({
-    value: () => name === "INITIAL_ADMIN_EMAIL" ? fixtures.initialAdmin : options?.default
+    value: () => name === "APPROVED_EXTERNAL_EMAIL" ? fixtures.approvedExternalEmail : options?.default
   })
 }));
 vi.mock("../functions/node_modules/firebase-functions/lib/esm/v2/providers/identity.mjs", () => ({
@@ -62,9 +63,10 @@ const inviteClaims = {
   authMethod: "google", invitedEmail: schoolEmail
 };
 const adminToken = {
-  uid: "admin-1", email: "legacy@example.com",
+  uid: "admin-1", email: "admin@foothillsacademy.org", email_verified: true,
+  authMethod: "google", invitedEmail: "admin@foothillsacademy.org",
   organizationId: "student-assessment", role: "admin",
-  firebase: { sign_in_provider: "password" }
+  firebase: { sign_in_provider: "google.com" }
 };
 const pendingUser = {
   uid: "invited-1", email: schoolEmail, displayName: "Teacher",
@@ -87,6 +89,7 @@ function googleEvent(overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  fixtures.approvedExternalEmail = "";
   fixtures.auth.getUserByEmail.mockRejectedValue({ code: "auth/user-not-found" });
   fixtures.auth.createUser.mockResolvedValue(pendingUser);
   fixtures.auth.updateUser.mockResolvedValue(pendingUser);
@@ -203,12 +206,97 @@ describe("blocking functions and callable authorization", () => {
     expect(fixtures.auth.listUsers).not.toHaveBeenCalled();
   });
 
-  it("accepts an invited Google session while leaving existing legacy access available", async () => {
+  it("accepts an invited Google session and blocks legacy password sessions", async () => {
     await expect(initialize({ auth: { token: {
       ...adminToken, ...inviteClaims, email: schoolEmail, email_verified: true,
       firebase: { sign_in_provider: "google.com" }
     } } })).resolves.toEqual({ active: true, role: "teacher_ea" });
-    await expect(initialize({ auth: { token: adminToken } }))
-      .resolves.toEqual({ active: true, role: "admin" });
+    await expect(initialize({ auth: { token: {
+      uid: "legacy-1", email: schoolEmail, organizationId: "student-assessment", role: "admin",
+      email_verified: true, firebase: { sign_in_provider: "password" }
+    } } })).rejects.toMatchObject({ code: "permission-denied" });
+  });
+
+  it("cannot grant bootstrap Admin membership to the old configured initial email", async () => {
+    const data = { email: fixtures.initialAdmin, emailVerified: true, customClaims: {} };
+    expect(() => signIn(googleEvent({ data }))).toThrow("has not invited");
+    await expect(initialize({ auth: { token: {
+      uid: "bootstrap-1", email: fixtures.initialAdmin, email_verified: true,
+      authMethod: "google", invitedEmail: fixtures.initialAdmin,
+      firebase: { sign_in_provider: "google.com" }
+    } } })).resolves.toEqual({ active: false });
+    expect(fixtures.auth.setCustomUserClaims).not.toHaveBeenCalled();
+  });
+
+  it("rejects unmarked existing members even when their current provider is Google", () => {
+    expect(() => signIn(googleEvent({ data: {
+      email: schoolEmail, emailVerified: true,
+      customClaims: { organizationId: "student-assessment", role: "teacher_ea" }
+    } }))).toThrow("administrator");
+  });
+});
+
+describe("configured external exception", () => {
+  const email = "owner@gmail.com";
+  const claims = { ...inviteClaims, invitedEmail: email };
+
+  it("invites only the approved outside email and keeps the Google identity binding", async () => {
+    fixtures.approvedExternalEmail = " OWNER@GMAIL.COM ";
+    fixtures.auth.createUser.mockResolvedValue({ ...pendingUser, email });
+    await invite({ ...inviteRequest, data: { ...inviteRequest.data, email: " OWNER@GMAIL.COM " } });
+    expect(fixtures.auth.setCustomUserClaims).toHaveBeenCalledWith("invited-1", claims);
+    const mail = fixtures.queueMail.mock.calls[0][0];
+    expect(mail.to).toEqual([email]);
+    expect(mail.message.text).toContain(`Sign in with Google using ${email}`);
+    expect(mail.message.text).toContain("this exact Google account");
+    expect(mail.message.text).not.toContain("foothillsacademy.org Google account");
+    expect(fixtures.auth.generatePasswordResetLink).not.toHaveBeenCalled();
+    await expect(invite({ ...inviteRequest, data: { ...inviteRequest.data, email: "another@gmail.com" } }))
+      .rejects.toMatchObject({ code: "invalid-argument" });
+    expect(fixtures.auth.createUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts an invited Gmail exception in blocking and callable paths", async () => {
+    fixtures.approvedExternalEmail = email;
+    expect(signIn(googleEvent({
+      data: { email, emailVerified: true, customClaims: claims },
+      additionalUserInfo: { providerId: "google.com", profile: { email } }
+    }))).toBeUndefined();
+    await expect(initialize({ auth: { token: {
+      ...adminToken, ...claims, email, email_verified: true
+    } } })).resolves.toEqual({ active: true, role: "teacher_ea" });
+  });
+
+  it("requires managed Workspace proof for a non-Gmail outside exception", () => {
+    const workspaceEmail = "owner@example.org";
+    const workspaceClaims = { ...claims, invitedEmail: workspaceEmail };
+    fixtures.approvedExternalEmail = workspaceEmail;
+    const event = googleEvent({
+      data: { email: workspaceEmail, emailVerified: true, customClaims: workspaceClaims },
+      additionalUserInfo: { providerId: "google.com", profile: {
+        email: workspaceEmail, hd: "primary-workspace.org", verified_email: true
+      } }
+    });
+    expect(signIn(event)).toBeUndefined();
+    expect(() => signIn({ ...event,
+      additionalUserInfo: { providerId: "google.com", profile: { email: workspaceEmail, verified_email: true } }
+    })).toThrow("Gmail or a verified Google Workspace");
+  });
+
+  it("cannot bypass invitations or retain access after exception removal", async () => {
+    fixtures.approvedExternalEmail = email;
+    expect(() => signIn(googleEvent({
+      data: { email, emailVerified: true, customClaims: {} },
+      additionalUserInfo: { providerId: "google.com", profile: { email } }
+    }))).toThrow("has not invited");
+    fixtures.approvedExternalEmail = "";
+    expect(() => signIn(googleEvent({
+      data: { email, emailVerified: true, customClaims: claims },
+      additionalUserInfo: { providerId: "google.com", profile: { email } }
+    }))).toThrow("approved Google account");
+    await expect(initialize({ auth: { token: {
+      ...adminToken, ...claims, email, email_verified: true
+    } } })).rejects.toMatchObject({ code: "permission-denied" });
+    expect(fixtures.auth.setCustomUserClaims).not.toHaveBeenCalled();
   });
 });

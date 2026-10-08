@@ -1,0 +1,10 @@
+{
+  "auth": {
+    "providers": {
+      "googleSignIn": {
+        "oAuthBrandDisplayName": "Student Assessment Test",
+        "supportEmail": "stevemackidd@gmail.com"
+      }
+    }
+  }
+}
