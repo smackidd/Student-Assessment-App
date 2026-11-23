@@ -20,7 +20,6 @@ export type StudentReportSourceRow = {
 
 export type StudentReportColumn = {
   key: string;
-  year: string;
   roundId: string;
   window: string;
   windowColor: string;
@@ -53,7 +52,7 @@ export type StudentReportBlockInput = {
   rows: StudentReportSourceRow[];
 };
 
-export type StudentReportHeaderLevel = "year" | "window" | "section";
+export type StudentReportHeaderLevel = "window" | "section";
 
 export type StudentReportHeaderGroup = {
   key: string;
@@ -139,17 +138,18 @@ export function buildStudentReportBlock(
 ): StudentReportBlock {
   const rows = sourceRows.filter((row) => row.assessmentId === assessmentId);
   const columnsByKey = new Map<string, StudentReportColumn>();
-  const yearOrder = new Map<string, number>();
-  const yearsWithAssessmentColumns = new Set<string>();
+  const roundOrder = new Map<string, number>();
+  const sectionOrder = new Map<string, number>();
   const dataRowsByKey = new Map<string, StudentReportDataRow>();
 
   rows.forEach((row) => {
-    if (!yearOrder.has(row.year)) yearOrder.set(row.year, yearOrder.size);
+    if (!roundOrder.has(row.roundId)) roundOrder.set(row.roundId, roundOrder.size);
+    const sectionKey = [row.roundId, row.sectionId].join("|");
+    if (!sectionOrder.has(sectionKey)) sectionOrder.set(sectionKey, sectionOrder.size);
     const columnKey = studentReportColumnKey(row);
     if (!columnsByKey.has(columnKey)) {
       columnsByKey.set(columnKey, {
         key: columnKey,
-        year: row.year,
         roundId: row.roundId,
         window: row.window,
         windowColor: row.windowColor,
@@ -159,7 +159,6 @@ export function buildStudentReportBlock(
         field: row.field
       });
     }
-    if (row.fieldId !== STUDENT_REPORT_NO_DATA_ID) yearsWithAssessmentColumns.add(row.year);
 
     const dataRowKey = studentReportDataRowKey(row);
     const dataRow = dataRowsByKey.get(dataRowKey) ?? {
@@ -175,20 +174,28 @@ export function buildStudentReportBlock(
     dataRowsByKey.set(dataRowKey, dataRow);
   });
 
+  const hasAssessmentColumns = Array.from(columnsByKey.values()).some(
+    (column) => column.fieldId !== STUDENT_REPORT_NO_DATA_ID
+  );
+
   return {
     assessmentId,
     assessmentName,
     columns: Array.from(columnsByKey.values()).filter(
-      (column) => column.fieldId !== STUDENT_REPORT_NO_DATA_ID || !yearsWithAssessmentColumns.has(column.year)
-    ).sort((left, right) => (yearOrder.get(left.year) ?? 0) - (yearOrder.get(right.year) ?? 0)),
+      (column) => column.fieldId !== STUDENT_REPORT_NO_DATA_ID || !hasAssessmentColumns
+    ).sort((left, right) =>
+      (roundOrder.get(left.roundId) ?? 0) - (roundOrder.get(right.roundId) ?? 0) ||
+      (sectionOrder.get([left.roundId, left.sectionId].join("|")) ?? 0) -
+        (sectionOrder.get([right.roundId, right.sectionId].join("|")) ?? 0)
+    ),
     rows: Array.from(dataRowsByKey.values())
   };
 }
 
 export function studentReportColumnKey(
-  row: Pick<StudentReportSourceRow, "assessmentId" | "year" | "roundId" | "sectionId" | "fieldId">
+  row: Pick<StudentReportSourceRow, "assessmentId" | "roundId" | "sectionId" | "fieldId">
 ) {
-  return [row.assessmentId, row.year, row.roundId, row.sectionId, row.fieldId].join("|");
+  return [row.assessmentId, row.roundId, row.sectionId, row.fieldId].join("|");
 }
 
 export function studentReportDataRowKey(
@@ -230,17 +237,15 @@ export function buildStudentReportWorksheetLayout(blocks: StudentReportBlock[]):
     }
 
     const headerStartRow = rows.length;
-    rows.push(["Assessment Year", "", "", "", ...block.columns.map((column) => column.year)]);
     rows.push(["Assessment Window", "", "", "", ...block.columns.map((column) => column.window)]);
     rows.push(["Assessment Section", "", "", "", ...block.columns.map((column) => column.section || "General")]);
     rows.push(["Student", "Grade", "Homeroom", "Year", ...block.columns.map((column) => column.field)]);
 
     merges.push(
       { startRow: headerStartRow, startColumn: 0, endRow: headerStartRow, endColumn: 3 },
-      { startRow: headerStartRow + 1, startColumn: 0, endRow: headerStartRow + 1, endColumn: 3 },
-      { startRow: headerStartRow + 2, startColumn: 0, endRow: headerStartRow + 2, endColumn: 3 }
+      { startRow: headerStartRow + 1, startColumn: 0, endRow: headerStartRow + 1, endColumn: 3 }
     );
-    (["year", "window", "section"] as const).forEach((level, levelIndex) => {
+    (["window", "section"] as const).forEach((level, levelIndex) => {
       let startColumn = 4;
       studentReportHeaderGroups(block.columns, level).forEach((group) => {
         if (group.span > 1) {
@@ -278,24 +283,16 @@ function studentReportHeaderGroup(
   column: StudentReportColumn,
   level: StudentReportHeaderLevel
 ): StudentReportHeaderGroup {
-  if (level === "year") {
-    return {
-      key: column.year,
-      label: column.year,
-      span: 1,
-      windowColor: column.windowColor
-    };
-  }
   if (level === "window") {
     return {
-      key: [column.year, column.roundId].join("|"),
+      key: column.roundId,
       label: column.window || "No window",
       span: 1,
       windowColor: column.windowColor
     };
   }
   return {
-    key: [column.year, column.roundId, column.sectionId].join("|"),
+    key: [column.roundId, column.sectionId].join("|"),
     label: column.section || "General",
     span: 1,
     windowColor: column.windowColor

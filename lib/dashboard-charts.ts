@@ -11,12 +11,24 @@ export type DashboardChartAxisPoint = {
   year: string;
   window: string;
   section: string;
+  windowLabel?: string;
+};
+
+export type DashboardChartSeries = { id: string; label: string; sectionId?: string };
+export type DashboardRenderPoint = DashboardChartAxisPoint & {
+  /** Set on a year/window point that begins a group of template sections. */
+  sectionStart?: number;
+  sectionStartLabel?: string;
+  sectionLabel?: string;
+  sectionLine?: number;
+  [key: string]: string | number | null | undefined;
 };
 
 export type DashboardYearGroup = {
   year: string;
   firstAxisKey: string;
   lastAxisKey: string;
+  nextFirstAxisKey?: string;
   labelAxisKey: string;
 };
 
@@ -65,12 +77,18 @@ export function dashboardYearGroups(points: DashboardChartAxisPoint[]): Dashboar
     }
   });
 
-  return groups.map(({ year, points: yearPoints }) => ({
-    year,
-    firstAxisKey: yearPoints[0].axisKey,
-    lastAxisKey: yearPoints[yearPoints.length - 1].axisKey,
-    labelAxisKey: yearPoints[Math.floor(yearPoints.length / 2)].axisKey
-  }));
+  return groups.map(({ year, points: yearPoints }, i) => {
+    const first = yearPoints[0];
+    // A window can have several section ticks, only one of which carries its label.
+    const firstWindowLabel = yearPoints.find(point => point.window === first.window && point.windowLabel);
+    return {
+      year,
+      firstAxisKey: first.axisKey,
+      lastAxisKey: yearPoints[yearPoints.length - 1].axisKey,
+      nextFirstAxisKey: groups[i + 1]?.points[0].axisKey,
+      labelAxisKey: firstWindowLabel?.axisKey ?? first.axisKey
+    };
+  });
 }
 
 export function labelDashboardYears<T extends DashboardChartAxisPoint>(points: T[]): Array<T & { yearLabel: string }> {

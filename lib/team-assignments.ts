@@ -1,4 +1,5 @@
 import type { StudentPlacement } from "@/lib/overview-state";
+import { compareHomerooms } from "./homeroom-order";
 import type { TeamMember, UserRole } from "@/lib/organization-auth";
 
 export const SUPPORTED_GRADES = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12"] as const;
@@ -19,7 +20,7 @@ export function teamAssignmentHomerooms(placements: StudentPlacement[], schoolYe
     const homerooms = assignments[placement.grade] ?? (assignments[placement.grade] = []);
     if (!homerooms.includes(homeroom)) homerooms.push(homeroom);
   }
-  for (const homerooms of Object.values(assignments)) homerooms.sort();
+  for (const homerooms of Object.values(assignments)) homerooms.sort(compareHomerooms);
   return assignments;
 }
 

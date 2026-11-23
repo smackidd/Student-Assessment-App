@@ -3,7 +3,7 @@ import { latestSchoolYear } from "@/lib/team-assignments";
 
 export const appViews = ["overview", "dashboard", "assessment", "report", "files", "profile"] as const;
 export const assessmentPageTabs = ["builder", "entry"] as const;
-export const profilePageTabs = ["profile", "password", "audit", "team"] as const;
+export const profilePageTabs = ["profile", "password", "audit", "team", "classroom-groups"] as const;
 
 export type AppView = (typeof appViews)[number];
 export type AssessmentPageTab = (typeof assessmentPageTabs)[number];

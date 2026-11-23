@@ -1,0 +1,50 @@
+.favorites {
+  position: relative;
+  min-width: 0;
+  margin-block: 10px;
+  color: var(--ink);
+  font-size: 0.88rem;
+}
+
+.favorites summary {
+  width: fit-content;
+  padding-block: 4px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.controls {
+  border: 0;
+  padding: 0;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  margin-block: 8px;
+}
+
+.controls label { margin: 0; min-width: 0; }
+.controls select, .controls input { min-width: 0; }
+.sharing { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.controls .publicToggle { display: inline-flex; align-items: center; gap: 6px; }
+.publicToggle input { width: auto; margin: 0; }
+.close {
+  position: absolute;
+  top: 0;
+  right: 0;
+  border: 0;
+  padding: 2px 8px;
+  color: var(--ink);
+  background: transparent;
+  cursor: pointer;
+  font-size: 1.2rem;
+}
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.actions button {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--ink);
+  background: var(--panel-2);
+  cursor: pointer;
+}
+.actions button:disabled { opacity: 0.55; cursor: default; }

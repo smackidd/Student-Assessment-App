@@ -1,0 +1,9 @@
+.list { list-style: none; padding: 0; margin: 0; }
+.row, .actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.row { padding: .75rem 0; border-bottom: 1px solid var(--line); }
+.label { flex: 1 1 14rem; min-width: 0; overflow-wrap: anywhere; }
+.editor { display: grid; gap: .75rem; max-width: 36rem; margin-top: 1rem; overflow-wrap: anywhere; }
+.editor > label { display: grid; gap: .25rem; }
+.grades { display: flex; flex-wrap: wrap; gap: .5rem 1rem; min-width: 0; }
+.grades label { display: inline-flex; align-items: center; gap: .25rem; }
+.grades input { width: auto; }

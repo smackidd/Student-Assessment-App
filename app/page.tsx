@@ -11,23 +11,13 @@ import {
   type ColDef,
   type ICellEditorParams
 } from "ag-grid-community";
-import {
-  Bar,
-  BarChart,
-  Cell,
-  CartesianGrid,
-  Legend,
-  Line,
-  LineChart,
-  Pie,
-  PieChart,
-  ReferenceArea,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
+import { DashboardChartPlot } from "@/components/dashboard-chart-plot";
+import { useDashboardChart } from "@/components/use-dashboard-chart";
+import { SavedChartPicker, useReportSavedCharts } from "@/components/report-saved-charts";
+import { savedReportChartPlots } from "@/lib/dashboard-chart-model";
+import { reportChartScope } from "@/lib/report-saved-charts";
+import { DashboardChoicePicker } from "@/components/dashboard-choice-picker";
+import { DashboardFilterPicker } from "@/components/dashboard-filter-picker";
 import * as XLSX from "xlsx-js-style";
 import {
   getAuth,
@@ -67,6 +57,8 @@ import {
 } from "@/lib/assessment-entry";
 import { applySpreadsheetAssessmentValues } from "@/lib/spreadsheet-import";
 import { ReportPdfImporter, type ReportImportResult } from "@/components/report-pdf-importer";
+import { FilterFavorites } from "@/components/filter-favorites";
+import { decodeDashboardFavorite } from "@/lib/dashboard-favorite";
 import { applyReportImport, type ReportImportRequest } from "@/lib/report-pdf-import";
 import {
   columnHeadersForImportColumn,
@@ -82,18 +74,10 @@ import {
 import { ORF_PERCENTILE_CALCULATION_KEYS } from "@/lib/orf-calculations";
 import {
   addDashboardChart,
-  averageDashboardValues,
-  compactDashboardChartLabel,
-  compactDashboardLegendLabel,
-  dashboardAxisLabelCharacterLimit,
-  dashboardLegendLabelCharacterLimit,
-  dashboardYearGroups,
-  formatDashboardTooltipLabel,
-  labelDashboardYears,
-  removeDashboardChart,
-  type DashboardChartAxisPoint
+  removeDashboardChart
 } from "@/lib/dashboard-charts";
 import { resolveScaleCodeEditorValue, validScaleCodeValue } from "@/lib/scale-code";
+import { dashboardStudentOptions, defaultDashboardFilters } from "@/lib/dashboard-filters";
 import {
   addReportStudentId,
   buildStudentReportBlocks,
@@ -137,7 +121,11 @@ import {
   resolveTeamMemberAccess,
   teamAssignmentHomerooms
 } from "@/lib/team-assignments";
+import { compareHomerooms } from "@/lib/homeroom-order";
 import { firebaseApp } from "@/lib/firebase";
+import { useClassroomGroups, type ClassroomGroupList } from "@/lib/classroom-group-store";
+import type { ClassroomGroup } from "@/lib/classroom-groups";
+import { ClassroomGroupsPanel } from "@/components/classroom-groups-panel";
 import { AuthScreen } from "@/components/auth-screen";
 import { isInviteEmail, schoolEmailDomain } from "@/lib/google-sign-in";
 import { prepareInvitationHandoff, type InvitationSignInMethod } from "@/lib/invitation-handoff";
@@ -376,6 +364,7 @@ export default function StudentEvaluationApp() {
     [selectedId, templates]
   );
   const isAdmin = currentUserRole === "Admin";
+  const classroomGroupList = useClassroomGroups(organizationAccess === "active" ? authUser?.uid ?? null : null);
   const newestSchoolYear = useMemo(() => latestSchoolYear(schoolYears), [schoolYears]);
   const assignmentHomerooms = useMemo(
     () => teamAssignmentHomerooms(overviewPlacements, newestSchoolYear),
@@ -451,7 +440,7 @@ export default function StudentEvaluationApp() {
             .filter((placement) => placement.schoolYear === selectedOverviewYear && placement.grade === selectedOverviewGrade)
             .map((placement) => placement.homeroom)
         )
-      ).sort(),
+      ).sort(compareHomerooms),
     [overviewPlacements, selectedOverviewGrade, selectedOverviewYear]
   );
   const lockedFieldCount = builderSelected.fields.filter((field) => field.isCalculated).length;
@@ -1984,9 +1973,13 @@ export default function StudentEvaluationApp() {
             }}
           />
         ) : activeView === "dashboard" ? (
-          <Dashboard rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
+          <Dashboard key={authUser.uid} uid={authUser.uid} isAdmin={isAdmin} classroomGroups={classroomGroupList.groups} rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
         ) : activeView === "report" ? (
           <StudentReport
+            key={authUser.uid}
+            uid={authUser.uid}
+            isAdmin={isAdmin}
+            classroomGroups={classroomGroupList.groups}
             rows={authorizedRows}
             placements={authorizedPlacements}
             templates={templates}
@@ -2003,6 +1996,8 @@ export default function StudentEvaluationApp() {
           />
         ) : activeView === "profile" ? (
           <ProfilePage
+            classroomGroupList={classroomGroupList}
+            onClassroomGroupChanged={(action, name, description) => recordAudit(action, "Classroom group", name, description)}
             isAdmin={isAdmin}
             activeTab={profilePageTab}
             setActiveTab={setProfilePageTab}
@@ -2027,7 +2022,7 @@ export default function StudentEvaluationApp() {
             onSave={saveTablesToFirebase}
           />
         ) : (
-          <Dashboard rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
+          <Dashboard key={authUser.uid} uid={authUser.uid} isAdmin={isAdmin} classroomGroups={classroomGroupList.groups} rows={authorizedRows} placements={authorizedPlacements} templates={templates} schoolYears={isAdmin ? schoolYears : [selectedOverviewYear]} />
         )}
       </section>
 
@@ -2507,12 +2502,13 @@ function AssessmentBuilder({
 
         <div className="multi-picker">
           <span>Definition years</span>
-          <button className="picker-field-button" onClick={() => setDefinitionYearPickerOpen((open) => !open)} type="button">
+          <button className="picker-field-button" aria-expanded={definitionYearPickerOpen} onClick={() => setDefinitionYearPickerOpen((open) => !open)} type="button">
             <span>{definitionYearLabel}</span>
             <span className="dropdown-arrow" aria-hidden="true" />
           </button>
           {definitionYearPickerOpen ? (
             <div className="multi-picker-menu">
+              <PickerMenuClose label="Definition years" onClose={() => setDefinitionYearPickerOpen(false)} />
               <label className="checkbox-row select-all-row">
                 <input
                   checked={definitionYears.length === schoolYears.length}
@@ -2991,6 +2987,24 @@ function PickerField({
   );
 }
 
+function PickerMenuClose({ label, onClose }: { label: string; onClose: () => void }) {
+  return (
+    <button
+      aria-label={`Close ${label}`}
+      className="picker-menu-close"
+      title={`Close ${label}`}
+      type="button"
+      onClick={(event) => {
+        const trigger = event.currentTarget.parentElement?.previousElementSibling;
+        onClose();
+        if (trigger instanceof HTMLButtonElement) trigger.focus();
+      }}
+    >
+      <span aria-hidden="true">&times;</span>
+    </button>
+  );
+}
+
 function CheckboxPickerModal({
   title,
   items,
@@ -3014,9 +3028,7 @@ function CheckboxPickerModal({
       <section className="notes-modal panel picker-modal">
         <div className="modal-top">
           <h2>{title}</h2>
-          <button className="small-action ghost" onClick={onClose} type="button">
-            Done
-          </button>
+          <PickerMenuClose label={title} onClose={onClose} />
         </div>
         <button className="small-action ghost" onClick={() => onChange(allSelected ? [] : items.map((item) => item.id))} type="button">
           {allSelected ? "Clear all" : "Select all"}
@@ -3740,22 +3752,13 @@ function VpOverview({
 }
 
 type DashboardProps = {
+  uid: string;
+  isAdmin: boolean;
+  classroomGroups: ClassroomGroup[];
   rows: OrfResultRow[];
   placements: StudentPlacement[];
   templates: AssessmentTemplate[];
   schoolYears: string[];
-};
-
-type DashboardChartPointBase = DashboardChartAxisPoint & {
-  sectionLabel: string;
-  windowLabel: string;
-  sectionLine: number;
-  color: string;
-  [key: string]: string | number | null;
-};
-
-type DashboardChartPoint = DashboardChartPointBase & {
-  yearLabel: string;
 };
 
 function Dashboard(props: DashboardProps) {
@@ -3805,6 +3808,9 @@ function Dashboard(props: DashboardProps) {
 }
 
 function DashboardChartCard({
+  uid,
+  isAdmin,
+  classroomGroups,
   rows,
   placements,
   templates,
@@ -3823,552 +3829,53 @@ function DashboardChartCard({
   onRemove: () => void;
   showAdd: boolean;
 }) {
-  const [chartType, setChartType] = useState<"progression" | "comparison" | "average">("progression");
-  const [homeroom, setHomeroom] = useState("all");
-  const [studentKey, setStudentKey] = useState("all");
-  const [assessmentIds, setAssessmentIds] = useState<string[]>(templates[0] ? [templates[0].id] : []);
-  const selectedAssessments = useMemo(
-    () => templates.filter((template) => assessmentIds.includes(template.id)),
-    [assessmentIds, templates]
-  );
-  const selectedAssessment = selectedAssessments[0] ?? templates[0];
-  const [fieldKeys, setFieldKeys] = useState<string[]>(templates[0]?.fields[0] ? [`${templates[0].id}::${templates[0].fields[0].id}`] : []);
-  const [sectionId, setSectionId] = useState("all");
-  const [roundId, setRoundId] = useState("all");
-  const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
-  const [assessmentPickerOpen, setAssessmentPickerOpen] = useState(false);
-  const [fieldPickerOpen, setFieldPickerOpen] = useState(false);
-  const [yearPickerOpen, setYearPickerOpen] = useState(false);
-  const [progressionFullScreen, setProgressionFullScreen] = useState(false);
-  const [chartWidth, setChartWidth] = useState(1000);
-  const allYearsSelected = selectedYears.length === schoolYears.length;
-  const allAssessmentsSelected = assessmentIds.length === templates.length;
-  const fieldOptions = useMemo(
-    () =>
-      selectedAssessments.flatMap((assessment) =>
-        assessment.fields.map((field) => ({
-          id: `${assessment.id}::${field.id}`,
-          label: `${assessment.name} / ${field.name}`,
-          assessment,
-          field
-        }))
-      ),
-    [selectedAssessments]
-  );
-  const selectedFieldRefs = useMemo(
-    () => fieldOptions.filter((option) => fieldKeys.includes(option.id)),
-    [fieldKeys, fieldOptions]
-  );
-  const selectedField = selectedFieldRefs[0]?.field;
-  const assessmentPickerLabel = allAssessmentsSelected
-    ? "All assessments"
-    : assessmentIds.length === 1
-      ? templates.find((template) => template.id === assessmentIds[0])?.name ?? "1 assessment"
-      : assessmentIds.length
-        ? `${assessmentIds.length} assessments`
-        : "No assessments";
-  const fieldPickerLabel =
-    selectedFieldRefs.length === 1
-      ? selectedFieldRefs[0].field.name
-      : selectedFieldRefs.length
-        ? `${selectedFieldRefs.length} fields`
-        : "No fields";
-  const yearPickerLabel = allYearsSelected
-    ? "All Years"
-    : selectedYears.length === 1
-      ? selectedYears[0]
-      : selectedYears.length
-        ? `${selectedYears.length} Years`
-        : "No Years";
+  const [filters, setFilters] = useState(() => defaultDashboardFilters(templates[0]));
+  const { chartType, assessmentId, homerooms, sectionIds, teamId, studentIds, roundId, years } = filters;
+  const { selectedAssessment, cohort, options, selectedYears, plot } = useDashboardChart({
+    rows, placements, schoolYears, templates, classroomGroups, assessmentForYear: assessmentTemplateForYear, scaleCodesForField
+  }, filters);
+  const studentOptions = useMemo(() => dashboardStudentOptions(cohort.students, studentIds), [cohort.students, studentIds]);
 
-  const selectedYearPlacements = useMemo(
-    () => placements.filter((placement) => selectedYears.includes(placement.schoolYear)),
-    [placements, selectedYears]
-  );
-  const dashboardPlacements = useMemo(
-    () =>
-      selectedYearPlacements.filter((placement) => homeroom === "all" || placement.homeroom === homeroom),
-    [homeroom, selectedYearPlacements]
-  );
-  const homerooms = useMemo(
-    () => Array.from(new Set(selectedYearPlacements.map((placement) => placement.homeroom))).sort(),
-    [selectedYearPlacements]
-  );
-  const rowsById = useMemo(() => new Map(rows.map((row) => [row.id, row])), [rows]);
-  const availableStudents = useMemo(() => {
-    const seen = new Set<string>();
-    return dashboardPlacements
-      .map((placement) => rowsById.get(placement.studentId))
-      .filter((row): row is OrfResultRow => {
-        if (!row) return false;
-        const key = dashboardStudentKey(row);
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .sort((first, second) => first.student.localeCompare(second.student));
-  }, [dashboardPlacements, rowsById]);
-
-  useEffect(() => {
-    setAssessmentIds((current) => {
-      const valid = current.filter((id) => templates.some((template) => template.id === id));
-      return valid.length ? valid : templates[0] ? [templates[0].id] : [];
-    });
-  }, [templates]);
-
-  useEffect(() => {
-    setFieldKeys((current) => {
-      const valid = current.filter((key) => fieldOptions.some((option) => option.id === key));
-      return valid.length ? valid : fieldOptions[0] ? [fieldOptions[0].id] : [];
-    });
-  }, [fieldOptions]);
-
-  useEffect(() => {
-    if (studentKey !== "all" && !availableStudents.some((row) => dashboardStudentKey(row) === studentKey)) {
-      setStudentKey("all");
-    }
-  }, [availableStudents, studentKey]);
-
-  const filteredPlacements = useMemo(
-    () =>
-      dashboardPlacements.filter((placement) => {
-        if (studentKey === "all") return true;
-        const row = rowsById.get(placement.studentId);
-        return row ? dashboardStudentKey(row) === studentKey : false;
-      }),
-    [dashboardPlacements, rowsById, studentKey]
-  );
-  const selectedScaleCodes = useMemo(() => (selectedField ? scaleCodesForField(selectedField) : []), [selectedField]);
-  const usesScaleYAxis =
-    selectedFieldRefs.length === 1 &&
-    selectedScaleCodes.length > 0 &&
-    (selectedField?.dataType === "letter" || selectedField?.dataType === "text");
-  const availableSections = useMemo(() => {
-    if (!selectedFieldRefs.length) return [];
-    const sections = new Map<string, AssessmentSectionTemplate>();
-    selectedFieldRefs.forEach(({ assessment, field }) => {
-      assessment.rounds.forEach((round) => {
-        dashboardSectionsForField(assessment, round, field).forEach((section) => {
-          sections.set(section.id, section);
-        });
-      });
-    });
-    return Array.from(sections.values());
-  }, [selectedFieldRefs]);
-
-  useEffect(() => {
-    if (sectionId !== "all" && !availableSections.some((section) => section.id === sectionId)) {
-      setSectionId("all");
-    }
-  }, [availableSections, sectionId]);
-
-  useEffect(() => {
-    if (roundId !== "all" && !selectedAssessments.some((assessment) => assessment.rounds.some((round) => round.id === roundId))) {
-      setRoundId("all");
-    }
-  }, [roundId, selectedAssessments]);
-
-  const chartData = useMemo(() => {
-    if (!selectedFieldRefs.length) return [];
-    const pointsByYear = selectedYears
-      .slice()
-      .sort(compareSchoolYears)
-      .flatMap((year) => {
-        const points = new Map<
-          string,
-          DashboardChartPointBase
-        >();
-
-        selectedFieldRefs.forEach(({ id, assessment, field }) => {
-          const chartPoints = assessment.rounds.reduce<
-            Array<{ round: AssessmentRoundTemplate; section?: AssessmentSectionTemplate; sectionIndex: number; sectionCount: number }>
-          >((roundPoints, round) => {
-            if (roundId !== "all" && round.id !== roundId) return roundPoints;
-            const sections = dashboardSectionsForField(assessment, round, field);
-            if (sections.length) {
-              const filteredSections = sectionId === "all" ? sections : sections.filter((section) => section.id === sectionId);
-              filteredSections.forEach((section, sectionIndex) =>
-                roundPoints.push({ round, section, sectionIndex, sectionCount: filteredSections.length })
-              );
-            } else if (sectionId === "all") {
-              roundPoints.push({ round, sectionIndex: 0, sectionCount: 0 });
-            }
-            return roundPoints;
-          }, []);
-
-          chartPoints.forEach(({ round, section, sectionIndex, sectionCount }) => {
-            const key = `${assessment.id}-${year}-${round.id}-${section?.id ?? "window"}`;
-            const showWindowLabel = !section || sectionIndex === Math.floor(sectionCount / 2);
-            const existing = points.get(key);
-            const basePoint =
-              existing ??
-              {
-                axisKey: key,
-                year,
-                window: round.label,
-                section: section?.name ?? "",
-                sectionLabel: section?.name ?? "",
-                windowLabel: showWindowLabel ? windowIndicatorForRound(round) : "",
-                sectionLine: sectionIndex % 2,
-                color: round.color ?? "#101820"
-              };
-            points.set(key, {
-              ...basePoint,
-              [id]: averageDashboardFieldValue(filteredPlacements, rowsById, assessment, round, field, year, section)
-            });
-          });
-        });
-
-        return Array.from(points.values());
-      });
-    return labelDashboardYears(pointsByYear) as DashboardChartPoint[];
-  }, [filteredPlacements, rowsById, roundId, sectionId, selectedFieldRefs, selectedYears]);
-
-  const chartPointsByAxisKey = useMemo(
-    () => new Map(chartData.map((point) => [point.axisKey, point])),
-    [chartData]
-  );
-  const yearGroups = useMemo(() => dashboardYearGroups(chartData), [chartData]);
-
-  const pieData = useMemo(
-    () =>
-      selectedFieldRefs
-        .map(({ id, label, field }) => {
-          const values = chartData
-            .map((point) => point[id])
-            .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-          return {
-            name: label,
-            value: averageDashboardValues(values, field.dataType) ?? 0
-          };
-        })
-        .filter((item) => item.value > 0),
-    [chartData, selectedFieldRefs]
-  );
-  const seriesPalette = ["#101820", "#7868e6", "#0f766e", "#c2410c", "#2563eb", "#be185d", "#6b7280"];
-  const chartTitle =
-    chartType === "progression"
-      ? "Average field score by year and window"
-      : chartType === "comparison"
-        ? "Field comparison by year and window"
-        : "Average selected field values";
-  const chartTypeLabel = chartType === "progression" ? "Progression" : chartType === "comparison" ? "Comparison" : "Average";
-  const axisLabelCharacterLimit = dashboardAxisLabelCharacterLimit(chartWidth, chartData.length);
-  const legendLabelCharacterLimit = dashboardLegendLabelCharacterLimit(chartWidth, selectedFieldRefs.length);
-
-  const handleChartResize = useCallback((width: number) => {
-    const nextWidth = Math.max(1, Math.round(width));
-    setChartWidth((current) => (current === nextWidth ? current : nextWidth));
-  }, []);
-
-  const renderDashboardAxisTick = useCallback(
-    (props: DashboardAxisTickProps) => {
-      const axisKey = String(props.payload?.value ?? "");
-      return (
-        <DashboardAxisTick
-          {...props}
-          labelCharacterLimit={axisLabelCharacterLimit}
-          point={chartPointsByAxisKey.get(axisKey)}
-        />
-      );
-    },
-    [axisLabelCharacterLimit, chartPointsByAxisKey]
-  );
-
-  const renderDashboardLegendLabel = useCallback(
-    (value: string | number) => {
-      const fullLabel = String(value);
-      return (
-        <span aria-label={fullLabel} className="dashboard-legend-label" title={fullLabel}>
-          {compactDashboardLegendLabel(fullLabel, legendLabelCharacterLimit)}
-        </span>
-      );
-    },
-    [legendLabelCharacterLimit]
-  );
-
-  function toggleDashboardYear(year: string) {
-    setSelectedYears((current) =>
-      current.includes(year) ? current.filter((selectedYear) => selectedYear !== year) : [...current, year]
-    );
-  }
-
-  function toggleDashboardAssessment(id: string) {
-    setAssessmentIds((current) => {
-      const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
-      return next.length ? next : current;
-    });
-  }
-
-  function toggleDashboardField(id: string) {
-    setFieldKeys((current) => {
-      const next = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
-      return next.length ? next : current;
-    });
+  function updateFilters(patch: Partial<typeof filters>) {
+    setFilters((current) => ({ ...current, ...patch }));
   }
 
   return (
     <div className="dashboard-chart-workspace" data-dashboard-chart={chartId}>
       <div className="panel dashboard-filters">
-        <label>
-          Chart type
-          <select value={chartType} onChange={(event) => setChartType(event.target.value as "progression" | "comparison" | "average")}>
-            <option value="progression">Progression</option>
-            <option value="comparison">Comparison</option>
-            <option value="average">Average</option>
-          </select>
-        </label>
-
-        <label>
-          Home room
-          <select value={homeroom} onChange={(event) => setHomeroom(event.target.value)}>
-            <option value="all">All home rooms</option>
-            {homerooms.map((room) => (
-              <option key={room} value={room}>
-                {room}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          Student
-          <select value={studentKey} onChange={(event) => setStudentKey(event.target.value)}>
-            <option value="all">All students</option>
-            {availableStudents.map((row) => (
-              <option key={dashboardStudentKey(row)} value={dashboardStudentKey(row)}>
-                {row.student}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="multi-picker">
-          <span>Assessment</span>
-          <button className="picker-field-button" onClick={() => setAssessmentPickerOpen((open) => !open)} type="button">
-            <span>{assessmentPickerLabel}</span>
-            <span className="dropdown-arrow" aria-hidden="true" />
-          </button>
-          {assessmentPickerOpen ? (
-            <div className="multi-picker-menu wide">
-              <label className="checkbox-row select-all-row">
-                <input
-                  checked={allAssessmentsSelected}
-                  onChange={() =>
-                    setAssessmentIds(allAssessmentsSelected ? (templates[0] ? [templates[0].id] : []) : templates.map((template) => template.id))
-                  }
-                  type="checkbox"
-                />
-                All assessments
-              </label>
-              {templates.map((template) => (
-                <label className="checkbox-row" key={template.id}>
-                  <input checked={assessmentIds.includes(template.id)} onChange={() => toggleDashboardAssessment(template.id)} type="checkbox" />
-                  {template.name}
-                </label>
-              ))}
-            </div>
-          ) : null}
-        </div>
-
-        <div className="multi-picker">
-          <span>Field</span>
-          <button className="picker-field-button" onClick={() => setFieldPickerOpen((open) => !open)} type="button">
-            <span>{fieldPickerLabel}</span>
-            <span className="dropdown-arrow" aria-hidden="true" />
-          </button>
-          {fieldPickerOpen ? (
-            <div className="multi-picker-menu wide">
-              <label className="checkbox-row select-all-row">
-                <input
-                  checked={fieldOptions.length > 0 && fieldKeys.length === fieldOptions.length}
-                  onChange={() => setFieldKeys(fieldKeys.length === fieldOptions.length ? (fieldOptions[0] ? [fieldOptions[0].id] : []) : fieldOptions.map((option) => option.id))}
-                  type="checkbox"
-                />
-                All fields
-              </label>
-              {fieldOptions.map((option) => (
-                <label className="checkbox-row" key={option.id}>
-                  <input checked={fieldKeys.includes(option.id)} onChange={() => toggleDashboardField(option.id)} type="checkbox" />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          ) : null}
-        </div>
-
-        <label>
-          Section
-          <select value={sectionId} onChange={(event) => setSectionId(event.target.value)}>
-            <option value="all">All sections</option>
-            {availableSections.map((section) => (
-              <option key={section.id} value={section.id}>
-                {section.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          Window
-          <select value={roundId} onChange={(event) => setRoundId(event.target.value)}>
-            <option value="all">All windows</option>
-            {uniqueDashboardRounds(selectedAssessments).map((round) => (
-              <option key={round.id} value={round.id}>
-                {round.label}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="dashboard-year-picker">
-          <span>Year</span>
-          <button className="picker-field-button" onClick={() => setYearPickerOpen((open) => !open)} type="button">
-            <span>{yearPickerLabel}</span>
-            <span className="dropdown-arrow" aria-hidden="true" />
-          </button>
-
-          {yearPickerOpen ? (
-            <div className="dashboard-year-menu">
-              <label className="checkbox-row select-all-row">
-                <input
-                  checked={allYearsSelected}
-                  onChange={() => setSelectedYears(allYearsSelected ? [] : schoolYears)}
-                  type="checkbox"
-                />
-                All Years
-              </label>
-              {schoolYears.map((schoolYear) => (
-                <label className="checkbox-row" key={schoolYear}>
-                  <input checked={selectedYears.includes(schoolYear)} onChange={() => toggleDashboardYear(schoolYear)} type="checkbox" />
-                  {schoolYear}
-                </label>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        <DashboardChoicePicker label="Chart type" value={chartType}
+          options={[{ id: "progression", label: "Progression" }, { id: "comparison", label: "Comparison" }, { id: "average", label: "Average" }]}
+          onChange={(id) => updateFilters({ chartType: id as typeof chartType })} />
+        <DashboardChoicePicker label="Team" value={teamId}
+          options={[{ id: "all", label: "All teams" }, ...classroomGroups.map((team) => ({ id: team.id, label: team.name }))]}
+          onChange={(id) => updateFilters({ teamId: id, homerooms: [] })} />
+        <DashboardFilterPicker label="Home rooms" allLabel="All home rooms" selected={homerooms} emptyMeansAll
+          options={cohort.homerooms.map((room) => ({ id: room, label: room }))}
+          onChange={(next) => updateFilters({ homerooms: next })} />
+        <DashboardFilterPicker label="Students" allLabel="All students" selected={studentIds} options={studentOptions}
+          emptyMeansAll explicitAllOnly onChange={(next) => updateFilters({ studentIds: next })} />
+        <DashboardChoicePicker label="Assessment" value={selectedAssessment?.id ?? assessmentId}
+          options={templates.map((assessment) => ({ id: assessment.id, label: assessment.name }))}
+          onChange={(id) => updateFilters({ assessmentId: id, fieldKeys: [], sectionIds: [], roundId: "all" })} />
+        <DashboardFilterPicker label="Fields" allLabel="All fields" selected={options.selectedFieldKeys} options={options.fields}
+          onChange={(next) => updateFilters({ fieldKeys: next, sectionIds: [] })} />
+        <DashboardFilterPicker label="Sections" allLabel="All sections" selected={sectionIds} emptyMeansAll
+          options={options.sections.map((section) => ({ id: section.id, label: section.name }))}
+          onChange={(next) => updateFilters({ sectionIds: next })} />
+        <DashboardChoicePicker label="Window" value={roundId} options={[{ id: "all", label: "All windows" },
+          ...options.rounds.map((round) => ({ id: round.id, label: round.label }))]}
+          onChange={(id) => updateFilters({ roundId: id, sectionIds: [] })} />
+        <DashboardFilterPicker label="Years" allLabel="All years" selected={selectedYears}
+          options={schoolYears.map((year) => ({ id: year, label: year }))}
+          automatic={years === null} onAutomatic={() => updateFilters({ years: null })} onChange={(next) => updateFilters({ years: next })} />
       </div>
+      <FilterFavorites uid={uid} scope="dashboard" isAdmin={isAdmin}
+        value={{ ...filters, assessmentId: selectedAssessment?.id ?? assessmentId, fieldKeys: options.selectedFieldKeys }} onApply={setFilters}
+        decode={(saved) => decodeDashboardFavorite(saved, {
+          rows, placements, templates, schoolYears, classroomGroups, assessmentForYear: assessmentTemplateForYear
+        })} />
 
-      <div className={progressionFullScreen ? "panel chart-panel progression-chart-panel chart-panel-fullscreen" : "panel chart-panel progression-chart-panel"}>
-        <div className="panel-heading chart-panel-heading">
-          <div>
-            <p className="eyebrow">{chartTypeLabel}</p>
-            <h2>{chartTitle}</h2>
-          </div>
-          <button className="small-action ghost" onClick={() => setProgressionFullScreen((current) => !current)} type="button">
-            {progressionFullScreen ? "Exit full screen" : "Full screen"}
-          </button>
-        </div>
-        <div className="chart-frame">
-          {chartType === "average" && !pieData.length ? (
-            <div className="dashboard-chart-empty">No values match the selected filters.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height="100%" onResize={handleChartResize}>
-              {chartType === "progression" ? (
-                <LineChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  {yearGroups.map((group, index) => (
-                    <ReferenceArea
-                      fill={index % 2 ? "#7868e6" : "#68b39b"}
-                      fillOpacity={0.06}
-                      key={`progression-area-${group.year}`}
-                      strokeOpacity={0}
-                      x1={group.firstAxisKey}
-                      x2={group.lastAxisKey}
-                    />
-                  ))}
-                  {yearGroups.slice(1).map((group) => (
-                    <ReferenceLine
-                      key={`progression-boundary-${group.year}`}
-                      stroke="#66707c"
-                      strokeWidth={2}
-                      x={group.firstAxisKey}
-                    />
-                  ))}
-                  <XAxis dataKey="axisKey" height={98} interval={0} tick={renderDashboardAxisTick} tickMargin={12} />
-                  {usesScaleYAxis ? (
-                    <YAxis
-                      allowDecimals={false}
-                      domain={[1, selectedScaleCodes.length]}
-                      ticks={selectedScaleCodes.map((_, index) => index + 1)}
-                      tickFormatter={(value) => selectedScaleCodes[Number(value) - 1] ?? ""}
-                      width={48}
-                    />
-                  ) : (
-                    <YAxis allowDecimals={false} />
-                  )}
-                  <Tooltip
-                    formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
-                    labelFormatter={(_, payload) =>
-                      formatDashboardTooltipLabel(payload[0]?.payload as DashboardChartAxisPoint | undefined)
-                    }
-                  />
-                  <Legend formatter={renderDashboardLegendLabel} />
-                  {selectedFieldRefs.map((option, index) => (
-                    <Line
-                      connectNulls
-                      key={option.id}
-                      type="monotone"
-                      dataKey={option.id}
-                      name={option.label}
-                      stroke={seriesPalette[index % seriesPalette.length]}
-                      strokeWidth={3}
-                      dot={{ r: 4 }}
-                    />
-                  ))}
-                </LineChart>
-              ) : chartType === "comparison" ? (
-                <BarChart data={chartData} margin={{ top: 10, right: 18, bottom: 0, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  {yearGroups.map((group, index) => (
-                    <ReferenceArea
-                      fill={index % 2 ? "#7868e6" : "#68b39b"}
-                      fillOpacity={0.06}
-                      key={`comparison-area-${group.year}`}
-                      strokeOpacity={0}
-                      x1={group.firstAxisKey}
-                      x2={group.lastAxisKey}
-                    />
-                  ))}
-                  {yearGroups.slice(1).map((group) => (
-                    <ReferenceLine
-                      key={`comparison-boundary-${group.year}`}
-                      stroke="#66707c"
-                      strokeWidth={2}
-                      x={group.firstAxisKey}
-                    />
-                  ))}
-                  <XAxis dataKey="axisKey" height={98} interval={0} tick={renderDashboardAxisTick} tickMargin={12} />
-                  <YAxis allowDecimals={false} />
-                  <Tooltip
-                    formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
-                    labelFormatter={(_, payload) =>
-                      formatDashboardTooltipLabel(payload[0]?.payload as DashboardChartAxisPoint | undefined)
-                    }
-                  />
-                  <Legend formatter={renderDashboardLegendLabel} />
-                  {selectedFieldRefs.map((option, index) => (
-                    <Bar key={option.id} dataKey={option.id} name={option.label} fill={seriesPalette[index % seriesPalette.length]} />
-                  ))}
-                </BarChart>
-              ) : (
-                <PieChart>
-                  <Tooltip
-                    formatter={(value) => formatDashboardTooltipValue(value, selectedScaleCodes)}
-                    labelFormatter={() => "Selected field average"}
-                  />
-                  <Legend formatter={renderDashboardLegendLabel} />
-                  <Pie data={pieData} dataKey="value" nameKey="name" outerRadius={110} label>
-                    {pieData.map((entry, index) => (
-                      <Cell key={entry.name} fill={seriesPalette[index % seriesPalette.length]} />
-                    ))}
-                  </Pie>
-                </PieChart>
-              )}
-            </ResponsiveContainer>
-          )}
-        </div>
-      </div>
+      <DashboardChartPlot {...plot} />
       <div className="dashboard-chart-footer">
         {canRemove ? (
           <button aria-label={`Remove chart ${chartNumber}`} className="small-action ghost" onClick={onRemove} type="button">
@@ -4385,122 +3892,9 @@ function DashboardChartCard({
   );
 }
 
-type DashboardAxisTickProps = {
-  x?: string | number;
-  y?: string | number;
-  payload?: { value?: unknown };
-};
-
-function DashboardAxisTick(
-  props: DashboardAxisTickProps & { labelCharacterLimit: number; point?: DashboardChartPoint }
-) {
-  const x = Number(props.x);
-  const y = Number(props.y);
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  const sectionLabel = compactDashboardChartLabel(props.point?.sectionLabel ?? "", props.labelCharacterLimit);
-  const windowLabel = compactDashboardChartLabel(props.point?.windowLabel ?? "", props.labelCharacterLimit);
-  const yearLabel = props.point?.yearLabel ?? "";
-  const hasSection = Boolean(sectionLabel);
-  const staggerSection = props.point?.sectionLine === 1;
-
-  return (
-    <g transform={`translate(${x},${y})`}>
-      <title>{formatDashboardTooltipLabel(props.point)}</title>
-      {hasSection ? (
-        <text x={0} y={staggerSection ? 18 : 4} textAnchor="middle" fill="#101820" fontSize={10} fontWeight={900}>
-          {sectionLabel}
-        </text>
-      ) : null}
-      <text x={0} y={hasSection ? 38 : 12} textAnchor="middle" fill="#101820" fontSize={12} fontWeight={800}>
-        {windowLabel}
-      </text>
-      <text x={0} y={hasSection ? 56 : 30} textAnchor="middle" fill="#66707c" fontSize={11} fontWeight={700}>
-        {yearLabel}
-      </text>
-    </g>
-  );
-}
-
-function DashboardDot(props: { cx?: number; cy?: number; payload?: { color?: string } }) {
-  if (typeof props.cx !== "number" || typeof props.cy !== "number") return null;
-  return (
-    <circle
-      cx={props.cx}
-      cy={props.cy}
-      r={5}
-      fill={props.payload?.color ?? "#101820"}
-      stroke="#101820"
-      strokeWidth={1.5}
-    />
-  );
-}
-
-function dashboardSectionsForField(
-  template: AssessmentTemplate,
-  round: AssessmentRoundTemplate,
-  field: AssessmentFieldTemplate | undefined
-) {
-  if (!field?.sectionIds?.length) return [];
-  const sectionsForRound = sectionsForAssessmentRound(template, round);
-  const matchingSections = sectionsForRound.filter((section) => field.sectionIds?.includes(section.id));
-  if (matchingSections.length || template.id !== "orf") return matchingSections;
-  return sectionsForRound;
-}
-
-function averageDashboardFieldValue(
-  placements: StudentPlacement[],
-  rowsById: Map<string, OrfResultRow>,
-  template: AssessmentTemplate,
-  round: AssessmentRoundTemplate,
-  field: AssessmentFieldTemplate | undefined,
-  schoolYear: string,
-  section?: AssessmentSectionTemplate
-) {
-  const yearPlacements = placements.filter((placement) => placement.schoolYear === schoolYear);
-  if (!field || !yearPlacements.length) return null;
-  const sectionsForRound = section ? [section] : dashboardSectionsForField(template, round, field);
-  const scaleCodes = scaleCodesForField(field);
-  const values = yearPlacements
-    .flatMap((placement) => {
-      const row = rowsById.get(placement.studentId);
-      if (!row) return [];
-      const context = { schoolYear: placement.schoolYear, grade: placement.grade };
-      if (sectionsForRound.length) {
-        return sectionsForRound.map((section) => entryValue(row, template, round, field, section, context));
-      }
-      return [entryValue(row, template, round, field, undefined, context)];
-    })
-    .map((value) => dashboardChartValue(value, field, scaleCodes))
-    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
-
-  return averageDashboardValues(values, field.dataType);
-}
-
-function dashboardChartValue(value: unknown, field: AssessmentFieldTemplate, scaleCodes: string[]) {
-  if ((field.dataType === "letter" || field.dataType === "text") && scaleCodes.length) {
-    const codeIndex = scaleCodes.findIndex((code) => code.toLowerCase() === String(value ?? "").trim().toLowerCase());
-    return codeIndex >= 0 ? codeIndex + 1 : null;
-  }
-
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-function formatDashboardTooltipValue(value: unknown, scaleCodes: string[]) {
-  if (!scaleCodes.length) return value as number | string;
-  const numericValue = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(numericValue)) return "";
-  const exactCode = scaleCodes[numericValue - 1];
-  if (exactCode) return exactCode;
-  return numericValue.toFixed(1);
-}
 
 function compareSchoolYears(left: string, right: string) {
   return schoolYearStart(left) - schoolYearStart(right);
-}
-
-function windowIndicatorForRound(round: AssessmentRoundTemplate) {
-  const labelParts = round.label.split("/");
-  return labelParts.length > 1 ? labelParts[labelParts.length - 1].trim() : round.month;
 }
 
 function schoolYearStart(year: string) {
@@ -4508,34 +3902,9 @@ function schoolYearStart(year: string) {
   return Number.isFinite(start) ? start : 0;
 }
 
-function dashboardStudentKey(row: OrfResultRow) {
-  return normalizeStudentName(row.student);
-}
-
-function uniqueDashboardStudents(rows: OrfResultRow[]) {
-  const seen = new Set<string>();
-  return rows
-    .filter((row) => {
-      const key = dashboardStudentKey(row);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    })
-    .sort((first, second) => first.student.localeCompare(second.student));
-}
-
-function uniqueDashboardRounds(assessments: AssessmentTemplate[]) {
-  const seen = new Set<string>();
-  return assessments
-    .flatMap((assessment) => assessment.rounds)
-    .filter((round) => {
-      if (seen.has(round.id)) return false;
-      seen.add(round.id);
-      return true;
-    });
-}
-
 function ProfilePage({
+  classroomGroupList,
+  onClassroomGroupChanged,
   isAdmin,
   activeTab,
   setActiveTab,
@@ -4559,6 +3928,8 @@ function ProfilePage({
   saveMessage,
   onSave
 }: {
+  classroomGroupList: ClassroomGroupList;
+  onClassroomGroupChanged: (action: string, name: string, description: string) => void;
   isAdmin: boolean;
   activeTab: ProfilePageTab;
   setActiveTab: (tab: ProfilePageTab) => void;
@@ -4654,6 +4025,9 @@ function ProfilePage({
             <button className={visibleTab === "team" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("team")} type="button">
               Team
             </button>
+            <button className={visibleTab === "classroom-groups" ? "view-tab active" : "view-tab"} onClick={() => setActiveTab("classroom-groups")} type="button">
+              Classroom Groups
+            </button>
           </>
         ) : null}
       </div>
@@ -4710,6 +4084,10 @@ function ProfilePage({
           onRevertImport={onRevertImport}
         />
       ) : null}
+
+      {isAdmin && visibleTab === "classroom-groups" && (
+        <ClassroomGroupsPanel key={authUser?.uid} list={classroomGroupList} onChanged={onClassroomGroupChanged} />
+      )}
 
       {visibleTab === "team" ? (
         <div className="panel team-panel">
@@ -4928,12 +4306,18 @@ function InviteModal({
 }
 
 function StudentReport({
+  uid,
+  isAdmin,
+  classroomGroups,
   rows,
   placements,
   templates,
   schoolYears,
   recordAudit
 }: {
+  uid: string;
+  isAdmin: boolean;
+  classroomGroups: ClassroomGroup[];
   rows: OrfResultRow[];
   placements: StudentPlacement[];
   templates: AssessmentTemplate[];
@@ -4954,7 +4338,18 @@ function StudentReport({
   const [studentSearchOpen, setStudentSearchOpen] = useState(false);
   const [assessmentIds, setAssessmentIds] = useState<string[]>(templates[0] ? [templates[0].id] : []);
   const [evaluationPickerOpen, setEvaluationPickerOpen] = useState(false);
+  const [exportingReport, setExportingReport] = useState(false);
+  const [exportError, setExportError] = useState("");
   const [selectedYears, setSelectedYears] = useState<string[]>(schoolYears);
+  const chartContext = useMemo(() => ({
+    rows, placements, templates, schoolYears, classroomGroups, assessmentForYear: assessmentTemplateForYear, scaleCodesForField
+  }), [rows, placements, templates, schoolYears, classroomGroups]);
+  const savedCharts = useReportSavedCharts(uid, chartContext, isAdmin);
+  const scopedChartContext = useMemo(() => ({
+    ...chartContext, ...reportChartScope(rows, placements, schoolYears, selectedStudentIds, selectedYears)
+  }), [chartContext, rows, placements, schoolYears, selectedStudentIds, selectedYears]);
+  const reportChartPlots = useMemo(() => savedReportChartPlots(scopedChartContext, savedCharts.selected),
+    [scopedChartContext, savedCharts.selected]);
   const selectedStudents = useMemo(
     () =>
       selectedStudentIds.reduce<Array<{ id: string; name: string; detail: string; row: OrfResultRow }>>(
@@ -5045,21 +4440,37 @@ function StudentReport({
     setSelectedStudentIds((current) => removeReportStudentId(current, studentId));
   }
 
-  function downloadExcelReport() {
-    if (!selectedStudents.length || !selectedTemplates.length || !selectedYears.length || !reportBlocks.length) return;
-    const workbook = studentReportWorkbook(reportBlocks);
+  async function downloadExcelReport() {
+    if (exportingReport || !selectedStudents.length || !selectedTemplates.length || !selectedYears.length || !reportBlocks.length) return;
     const assessmentName = selectedTemplates.length === 1 ? selectedTemplates[0].name : "Multiple Evaluations";
     const studentFileLabel = selectedStudents.length === 1 ? selectedStudents[0].name : `${selectedStudents.length}-students`;
     const auditStudentLabel = selectedStudents.length === 1 ? selectedStudents[0].name : `${selectedStudents.length} students`;
     const selectedStudentNames = selectedStudents.map((student) => student.name).join(", ");
-    XLSX.writeFile(workbook, `${safeFileName(`${studentFileLabel}-${assessmentName}-assessment-report`)}.xlsx`, {
-      compression: true
-    });
+    const filename = `${safeFileName(`${studentFileLabel}-${assessmentName}-assessment-report`)}.xlsx`;
+    setExportingReport(true);
+    setExportError("");
+    try {
+      const workbook = studentReportWorkbook(reportBlocks);
+      if (reportChartPlots.length) {
+        const { writeReportWorkbookWithCharts } = await import("@/lib/report-workbook-charts");
+        const bytes = await writeReportWorkbookWithCharts(workbook, reportChartPlots);
+        downloadBlobFile(filename, new Blob([bytes], {
+          type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }));
+      } else {
+        XLSX.writeFile(workbook, filename, { compression: true });
+      }
+    } catch {
+      setExportError("The Excel report could not be created. Please try again.");
+      return;
+    } finally {
+      setExportingReport(false);
+    }
     recordAudit(
       "Downloaded report",
       "Student report",
       auditStudentLabel,
-      `Generated an Excel report for ${selectedStudentNames}; evaluations: ${selectedTemplates.map((template) => template.name).join(", ")}; years: ${selectedYears.join(", ")}.`
+      `Generated an Excel report for ${selectedStudentNames}; evaluations: ${selectedTemplates.map((template) => template.name).join(", ")}; years: ${selectedYears.join(", ")}; saved charts: ${reportChartPlots.length}.`
     );
   }
 
@@ -5151,12 +4562,13 @@ function StudentReport({
 
         <div className="multi-picker">
           <span>Evaluation</span>
-          <button className="picker-field-button" onClick={() => setEvaluationPickerOpen((open) => !open)} type="button">
+          <button className="picker-field-button" aria-expanded={evaluationPickerOpen} onClick={() => setEvaluationPickerOpen((open) => !open)} type="button">
             <span>{evaluationPickerLabel}</span>
             <span className="dropdown-arrow" aria-hidden="true" />
           </button>
           {evaluationPickerOpen ? (
             <div className="multi-picker-menu wide">
+              <PickerMenuClose label="Evaluations" onClose={() => setEvaluationPickerOpen(false)} />
               <label className="checkbox-row select-all-row">
                 <input
                   checked={allEvaluationsSelected}
@@ -5174,6 +4586,8 @@ function StudentReport({
             </div>
           ) : null}
         </div>
+
+        <SavedChartPicker charts={savedCharts} />
 
         <div className="report-year-picker">
           <label className="checkbox-row select-all-row">
@@ -5194,12 +4608,13 @@ function StudentReport({
 
         <button
           className="primary-action"
-          disabled={!selectedStudents.length || !selectedTemplates.length || !selectedYears.length}
+          disabled={exportingReport || savedCharts.status === "loading" || !selectedStudents.length || !selectedTemplates.length || !selectedYears.length}
           onClick={downloadExcelReport}
           type="button"
         >
-          Download Excel report
+          {exportingReport ? "Creating Excel report..." : "Download Excel report"}
         </button>
+        {exportError && <p role="alert">{exportError}</p>}
       </div>
 
       <div className="panel report-preview">
@@ -5230,6 +4645,11 @@ function StudentReport({
               {reportBlocks.map((block) => (
                 <StudentReportAssessmentTable block={block} key={block.assessmentId} />
               ))}
+              {reportChartPlots.map(({ id, ...plot }) => (
+                <div className="report-assessment-block" data-report-chart={id} key={id}>
+                  <DashboardChartPlot {...plot} embedded />
+                </div>
+              ))}
             </div>
           )}
         </div>
@@ -5239,7 +4659,6 @@ function StudentReport({
 }
 
 function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) {
-  const yearGroups = studentReportHeaderGroups(block.columns, "year");
   const windowGroups = studentReportHeaderGroups(block.columns, "window");
   const sectionGroups = studentReportHeaderGroups(block.columns, "section");
 
@@ -5250,12 +4669,6 @@ function StudentReportAssessmentTable({ block }: { block: StudentReportBlock }) 
         <table className="report-assessment-table">
           <caption>{block.assessmentName} assessment results</caption>
           <thead>
-            <tr>
-              <th colSpan={4} scope="row">Assessment Year</th>
-              {yearGroups.map((group) => (
-                <th colSpan={group.span} key={group.key} scope="colgroup">{group.label}</th>
-              ))}
-            </tr>
             <tr>
               <th colSpan={4} scope="row">Assessment Window</th>
               {windowGroups.map((group) => (
@@ -5493,7 +4906,10 @@ function safeFileName(value: string) {
 
 function downloadCsvFile(fileName: string, rows: string[][]) {
   const csv = rows.map((row) => row.map(csvCell).join(",")).join("\r\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  downloadBlobFile(fileName, new Blob([csv], { type: "text/csv;charset=utf-8" }));
+}
+
+function downloadBlobFile(fileName: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -5501,7 +4917,7 @@ function downloadCsvFile(fileName: string, rows: string[][]) {
   document.body.appendChild(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function csvCell(value: string) {

@@ -1,0 +1,67 @@
+.menu:global(.multi-picker-menu) {
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.header, .field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.field:focus-within {
+  outline: 2px solid currentColor;
+}
+
+.field input {
+  min-width: 0;
+  flex: 1;
+  padding: 5px 6px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.field input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.clear, .icon {
+  cursor: pointer;
+  color: inherit;
+}
+
+.clear {
+  padding: 3px 5px;
+  border: 0;
+  background: transparent;
+  font-size: 0.8rem;
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.results {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}

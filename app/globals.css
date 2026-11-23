@@ -1548,10 +1548,17 @@ textarea {
 
 .dashboard-chart-workspace {
   flex: 1 1 1000px;
-  min-width: min(100%, 1000px);
+  min-width: 0;
   max-width: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+}
+
+.dashboard-chart-workspace > .chart-panel {
+  /* Stretch to the card in normal flow and to the viewport insets in fullscreen. */
+  width: auto;
+  overflow-wrap: anywhere;
 }
 
 .dashboard-no-charts {
@@ -1569,7 +1576,7 @@ textarea {
 .dashboard-filters {
   align-self: start;
   display: grid;
-  grid-template-columns: repeat(8, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 135px), 1fr));
   gap: 10px;
   padding: 10px 12px;
   align-items: start;
@@ -1626,6 +1633,27 @@ textarea {
   border-radius: 8px;
   background: var(--panel);
   box-shadow: 0 18px 42px rgba(16, 24, 32, 0.18);
+}
+
+.picker-menu-close {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: inline-grid;
+  place-items: center;
+  justify-self: end;
+  margin-inline-start: auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: inherit;
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
 }
 
 .multi-picker-menu.wide {

@@ -31,6 +31,13 @@ service cloud.firestore {
         && request.auth.token.role == 'admin';
     }
 
+    function currentMember(orgId) {
+      let changed = /databases/$(database)/documents/organizations/$(orgId)/accessChanges/$(request.auth.uid);
+      return googleOrganizationMember() && request.auth.token.organizationId == orgId
+        && !exists(/databases/$(database)/documents/organizations/$(orgId)/revocations/$(request.auth.uid))
+        && (!exists(changed) || request.auth.token.iat * 1000 >= get(changed).data.changedAt.toMillis());
+    }
+
     function canUseRun() {
       return googleOrganizationMember();
     }
@@ -180,6 +187,154 @@ service cloud.firestore {
     match /organizations/{orgId}/auditEvents/{eventId} {
       allow read: if isOrganizationAdmin(orgId);
       allow create, update, delete: if false;
+    }
+
+    match /organizations/{orgId}/classroomGroups/{groupId} {
+      function defaultGroup() {
+        return groupId in ['team-1', 'team-2', 'team-3'];
+      }
+      function validGroup() {
+        let data = request.resource.data;
+        return data.keys().hasAll(['name', 'grades']) && data.keys().hasOnly(['name', 'grades'])
+          && data.name is string && data.name.size() <= 80
+          && data.name.matches('^\\S([^\\n\\r\\t]*\\S)?$')
+          && data.grades is list && data.grades.size() >= 1 && data.grades.size() <= 12
+          && data.grades.toSet().size() == data.grades.size()
+          && data.grades.hasOnly(['1','2','3','4','5','6','7','8','9','10','11','12']);
+      }
+      function deletedDefault() {
+        return defaultGroup() && request.resource.data == {'deleted': true};
+      }
+      allow read: if currentMember(orgId);
+      allow create, update: if currentMember(orgId) && request.auth.token.role == 'admin'
+        && (validGroup() || deletedDefault());
+      allow delete: if currentMember(orgId) && request.auth.token.role == 'admin' && !defaultGroup();
+    }
+
+    match /organizations/{orgId}/userPreferences/{userId}/filterFavorites/{scope} {
+      function ownsScope() {
+        return currentMember(orgId) && request.auth.uid == userId
+          && scope in ['dashboard', 'student-report'];
+      }
+      function stringList(ids, limit) {
+        // Rules have no list element type annotation. Round-trip every ID (not
+        // just the first/last); an embedded separator or non-string cannot match.
+        return ids is list && ids.size() <= limit && (ids.size() == 0 || (
+          ids.join('\n').split('\n') == ids
+          && ids.join('\n').matches('[^\r\n]{1,256}(\n[^\r\n]{1,256})*')));
+      }
+      function validStudentIds(ids) {
+        return stringList(ids, 2000) && !ids.hasAny(['all']) && ids.toSet().size() == ids.size();
+      }
+      function dashboardStudents(v) {
+        return ('studentKey' in v && !('studentIds' in v) && v.studentKey is string)
+          || (!('studentKey' in v) && 'studentIds' in v && validStudentIds(v.studentIds));
+      }
+      function validFilters(v) {
+        return v is map && ((scope == 'student-report'
+          && v.keys().hasOnly(['studentIds', 'assessmentIds', 'years'])
+          && v.studentIds is list && v.assessmentIds is list && v.years is list)
+          || (scope == 'dashboard'
+          && v.keys().hasOnly(['assessmentId', 'chartType', 'fieldKeys', 'homerooms', 'sectionIds', 'studentKey', 'studentIds', 'teamId', 'roundId', 'years'])
+          && v.chartType in ['progression', 'comparison', 'average'] && v.assessmentId is string
+          && v.fieldKeys is list && v.homerooms is list && v.sectionIds is list
+          && dashboardStudents(v) && v.teamId is string && v.roundId is string
+          && (v.years == null || v.years is list)));
+      }
+      function validItem(id, item) {
+        return item is map && item.keys().hasOnly(['id', 'name', 'revision', 'value', 'audience'])
+          && item.get('audience', 'private') in ['private', 'admin', 'all']
+          && item.id == id && item.name is string && item.name.size() <= 80 && item.name.matches('.*[^ \\t\\r\\n].*')
+          && item.revision is int && item.revision > 0 && validFilters(item.value)
+          && (item.get('audience', 'private') == 'private' || validPublication(id, item));
+      }
+      function shareableFilters(v) {
+        return (scope == 'student-report'
+          && stringList(v.studentIds, 2000) && stringList(v.assessmentIds, 512) && stringList(v.years, 128))
+          || (scope == 'dashboard'
+          && stringList(v.fieldKeys, 512) && stringList(v.homerooms, 512) && stringList(v.sectionIds, 512)
+          && (v.years == null || stringList(v.years, 128)));
+      }
+      function validPublication(id, item) {
+        let key = userId + ':' + id;
+        return shareableFilters(item.value)
+          && getAfter(/databases/$(database)/documents/organizations/$(orgId)/userPreferences/$(userId)/sharedFavorites/$(scope)/items/$(id)).data == item
+          && getAfter(/databases/$(database)/documents/organizations/$(orgId)/favoriteShareIndexes/$(scope)/audiences/$(item.audience)/entries/$(key)).data
+            == {'ownerUid': userId, 'favoriteId': id};
+      }
+      function retiredPublication(id, nextAudience) {
+        let old = resource.data.items.get(id, {}).get('audience', 'private');
+        let key = userId + ':' + id;
+        return !(old in ['admin', 'all']) || old == nextAudience || (
+          !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/favoriteShareIndexes/$(scope)/audiences/$(old)/entries/$(key))
+          && (nextAudience in ['admin', 'all'] ||
+            !existsAfter(/databases/$(database)/documents/organizations/$(orgId)/userPreferences/$(userId)/sharedFavorites/$(scope)/items/$(id))));
+      }
+      function validDocument(data) {
+        return data.keys().hasOnly(['version', 'changedId', 'items']) && data.version == 1
+          && data.changedId is string && data.changedId.matches('[A-Za-z0-9_-]{1,80}')
+          && data.items is map && data.items.size() > 0 && data.items.size() <= 50;
+      }
+      allow get: if ownsScope();
+      // Both clients delete a scope only after removing its last favorite. A
+      // bulk document delete cannot prove that every old publication was retired.
+      allow delete: if ownsScope() && (resource == null || (resource.data.items.size() == 1
+        && retiredPublication(resource.data.items.keys()[0], 'private')));
+      allow list: if false;
+      allow create: if ownsScope() && validDocument(request.resource.data)
+        && request.resource.data.items.keys().hasOnly([request.resource.data.changedId])
+        && validItem(request.resource.data.changedId, request.resource.data.items[request.resource.data.changedId]);
+      allow update: if ownsScope() && validDocument(request.resource.data)
+        && request.resource.data.items.diff(resource.data.items).affectedKeys().hasOnly([request.resource.data.changedId])
+        && retiredPublication(request.resource.data.changedId,
+          request.resource.data.items.get(request.resource.data.changedId, {}).get('audience', 'private'))
+        && (!(request.resource.data.changedId in request.resource.data.items)
+          || validItem(request.resource.data.changedId, request.resource.data.items[request.resource.data.changedId]));
+    }
+
+    function favoriteScope(scope) {
+      return scope in ['dashboard', 'student-report'];
+    }
+    function favoriteAudience(audience) {
+      return audience == 'all' || (audience == 'admin' && request.auth.token.role == 'admin');
+    }
+    function favoriteSource(orgId, owner, scope) {
+      return /databases/$(database)/documents/organizations/$(orgId)/userPreferences/$(owner)/filterFavorites/$(scope);
+    }
+    function afterAudience(orgId, owner, scope, id) {
+      let path = favoriteSource(orgId, owner, scope);
+      return existsAfter(path) ? getAfter(path).data.items.get(id, {}).get('audience', 'private') : 'private';
+    }
+    match /organizations/{orgId}/userPreferences/{owner}/sharedFavorites/{scope}/items/{id} {
+      function member() {
+        return currentMember(orgId) && favoriteScope(scope);
+      }
+      // A stored projection alone is never authority for a read.
+      allow get: if member() && favoriteAudience(resource.data.audience)
+        && get(favoriteSource(orgId, owner, scope)).data.items[id] == resource.data;
+      allow list: if false;
+      allow create, update: if member() && request.auth.uid == owner
+        && request.resource.data.audience in ['admin', 'all']
+        && getAfter(favoriteSource(orgId, owner, scope)).data.items[id] == request.resource.data;
+      allow delete: if member() && request.auth.uid == owner
+        && !(afterAudience(orgId, owner, scope, id) in ['admin', 'all']);
+    }
+    match /organizations/{orgId}/favoriteShareIndexes/{scope}/audiences/{audience}/entries/{key} {
+      function member() {
+        return currentMember(orgId) && favoriteScope(scope) && audience in ['admin', 'all'];
+      }
+      function validHandle(data) {
+        return data.keys().hasOnly(['ownerUid', 'favoriteId']) && data.ownerUid == request.auth.uid
+          && data.favoriteId is string && data.favoriteId.matches('[A-Za-z0-9_-]{1,80}')
+          && key == request.auth.uid + ':' + data.favoriteId
+          && getAfter(favoriteSource(orgId, request.auth.uid, scope)).data.items[data.favoriteId].audience == audience;
+      }
+      allow get, list: if member() && favoriteAudience(audience);
+      allow create, update: if member() && validHandle(request.resource.data);
+      // Remove only the final delimited ID; even a UID containing ':' is unambiguous.
+      allow delete: if member() && key != request.auth.uid
+        && key.replace(':[A-Za-z0-9_-]{1,80}$', '') == request.auth.uid
+        && (resource == null || afterAudience(orgId, request.auth.uid, scope, resource.data.favoriteId) != audience);
     }
 
     match /{document=**} {

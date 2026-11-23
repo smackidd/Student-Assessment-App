@@ -16,8 +16,10 @@
     "test:guards": "node --test scripts/clear-test-year.test.cjs scripts/repair-import-values.test.cjs scripts/migrate-test-google-sso.test.cjs scripts/stage-test-google-sso-resources.test.cjs"
   },
   "dependencies": {
+    "@xmldom/xmldom": "0.9.12",
     "ag-grid-community": "latest",
     "ag-grid-react": "latest",
+    "fflate": "0.8.3",
     "firebase": "latest",
     "next": "latest",
     "pdfjs-dist": "6.3.289",

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { dashboardPdfSlices } from "./dashboard-charts-pdf";
 import {
   addDashboardChart,
   compactDashboardChartLabel,
@@ -39,21 +40,43 @@ describe("dashboard chart presentation", () => {
     expect(compactDashboardLegendLabel("Oral Reading Fluency / Comprehension", 12)).toBe("Oral... / Compr...");
   });
 
-  it("identifies each contiguous school-year boundary and midpoint", () => {
+  it("ends bands at the following year's first tick and labels the first window", () => {
     expect(dashboardYearGroups(points)).toEqual([
       {
         year: "2025-2026",
         firstAxisKey: "2025-fall",
         lastAxisKey: "2025-winter",
-        labelAxisKey: "2025-winter"
+        nextFirstAxisKey: "2026-fall",
+        labelAxisKey: "2025-fall"
       },
       {
         year: "2026-2027",
         firstAxisKey: "2026-fall",
         lastAxisKey: "2026-spring",
-        labelAxisKey: "2026-winter"
+        labelAxisKey: "2026-fall"
       }
     ]);
+  });
+
+  it("aligns the year with its first window label when a window spans section ticks", () => {
+    const sectionTicks = [
+      { ...points[0], windowLabel: "" },
+      { ...points[0], axisKey: "fall-B", windowLabel: "Fall" },
+      { ...points[1], windowLabel: "Winter" }
+    ];
+    expect(labelDashboardYears(sectionTicks).map(p => p.yearLabel)).toEqual(["", "2025-2026", ""]);
+  });
+
+  it("tiles the whole PDF graph without gaps, breaking between ticks where possible", () => {
+    const ticks = Array.from({ length: 30 }, (_, i) => 108 + i * 100);
+    const slices = dashboardPdfSlices(3100, 68, ticks);
+    expect(slices[0].start).toBe(68);
+    expect(slices.at(-1)?.end).toBe(3100);
+    slices.slice(1).forEach((slice, i) => {
+      expect(slices[i].end).toBe(slice.start);
+      expect((slice.start - 158) % 100).toBe(0);
+    });
+    expect(dashboardPdfSlices(480, 0, [])).toEqual([{ start: 0, end: 480 }]);
   });
 
   it("labels every year exactly once even when it has multiple chart points", () => {
